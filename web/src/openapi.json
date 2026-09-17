@@ -1,0 +1,1849 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Swarm Builder",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Get Health",
+        "description": "Report server version, resolved model/settings state, and\nwhether a compile is currently expected to succeed.\n\n``compile_ready`` is ``False`` -- with a human-readable string\nappended to ``blockers`` for each contributing reason -- whenever\nany of: the resolved default model came from the bundle fallback\n(nothing the user actually configured); ``uv`` is not on ``PATH``;\nthe resolved workspace directory is not writable; or\n``settings.yaml`` exists but failed to parse/read. Otherwise\n``compile_ready`` is ``True`` and ``blockers`` is empty.",
+        "operationId": "get_health_api_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graphs": {
+      "get": {
+        "tags": [
+          "graphs"
+        ],
+        "summary": "List Graphs Route",
+        "description": "List every saved graph as a summary, plus one entry per file that\nfailed to parse/validate -- a single bad file never 500s the whole\nlisting (``store.graphs.list_graphs``'s own contract).",
+        "operationId": "list_graphs_route_api_graphs_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GraphListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graphs/{graph_id}": {
+      "get": {
+        "tags": [
+          "graphs"
+        ],
+        "summary": "Get Graph Route",
+        "description": "Return the full graph document.\n\n404 (naming the resolved path that was checked) when no such graph\nexists; 422 for a malformed/path-unsafe id, or for a graph file that\nis not valid JSON or fails :class:`SwarmGraph` validation (a client's\nown bad write, or a file corrupted by an interrupted process -- never\nan uncaught exception reaching the ASGI stack); 500 for any other\nfilesystem failure while reading.",
+        "operationId": "get_graph_route_api_graphs__graph_id__get",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwarmGraph"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "graphs"
+        ],
+        "summary": "Put Graph Route",
+        "description": "Validate + atomically write a graph document.\n\nThe path id is authoritative: a body ``id`` that disagrees with the\npath parameter is rejected with 422 naming both, rather than\nsilently overwritten or silently accepted. ``updated_at`` is always\nserver-stamped to ``datetime.now(UTC)`` on every successful write,\noverwriting whatever placeholder the client sent -- the response\nbody reflects the stamp that was actually persisted.\n\nBody validation against :class:`SwarmGraph` (including its\n``_check_structural_integrity`` model validator) happens\nautomatically via the ``graph: SwarmGraph`` parameter annotation\nbefore this function body even runs; a validation failure surfaces\nas FastAPI's normal 422 with no extra handling needed here.",
+        "operationId": "put_graph_route_api_graphs__graph_id__put",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwarmGraph"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SwarmGraph"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "graphs"
+        ],
+        "summary": "Delete Graph Route",
+        "description": "Remove the graph document; also remove its generated project\ndirectory when ``?project=true`` is given (idempotent -- a project\nthat was never compiled is not an error).\n\n404 when the graph itself does not exist (the ``?project`` flag\nnever changes that: a missing graph is always a 404 regardless of\nwhether a project directory happens to exist for that id).",
+        "operationId": "delete_graph_route_api_graphs__graph_id__delete",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Project"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteGraphResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graphs/{graph_id}/review": {
+      "post": {
+        "tags": [
+          "graphs"
+        ],
+        "summary": "Review Graph Route",
+        "description": "Run the Phase-1 static review over a saved graph.\n\nThis is the \"initial review\" a user triggers before compiling: cycles,\nunreachable nodes, state ownership, port-type mismatches, branch\nconsistency, and the rest of the structural rules.\n\n**Lazy import, deliberately -- this is a degradation seam.** The whole\n``swarm_builder.compile`` subsystem exists only to serve the compile\nand review endpoints, and it is much heavier than the rest of the\nserver (it pulls in the codegen, agent and pipeline modules). Importing\nit at module level would make a broken compile subsystem take the\nentire server down at startup; importing it here means that subsystem\nfails *this endpoint* alone, with a clear 503, while graph CRUD,\ntemplates, models and health keep working.",
+        "operationId": "review_graph_route_api_graphs__graph_id__review_post",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReviewResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/templates": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "List Templates",
+        "description": "Return the template catalog's five picker-facing fields.\n\nRaises:\n    fastapi.HTTPException: 503 if the template registry cannot be\n        imported, so one broken subsystem fails this route rather\n        than server startup.",
+        "operationId": "list_templates_api_templates_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TemplateEntryOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Templates Api Templates Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "Get Models",
+        "description": "List every configured harness route plus the resolved default,\nfor a model picker UI.\n\nA route is only ever read from a :class:`Settings` whose ``error``\nis ``None`` (a settings file that failed to parse contributes zero\nroutes, matching :func:`resolve_effective_model`'s own fallthrough\nbehavior) -- but ``settings_error`` itself is still reported\nverbatim so the picker can explain why the route list is empty.",
+        "operationId": "get_models_api_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graphs/{graph_id}/export": {
+      "get": {
+        "tags": [
+          "export"
+        ],
+        "summary": "Export Graph",
+        "description": "404 (naming the expected, never-created path) when the graph has\nno compiled project yet. This route does not itself validate that a\nGRAPH document with this id exists -- only that a PROJECT directory\ndoes -- because ``project_exists``/``project_dir`` already validate\n``graph_id`` as a path segment on their own (via\n``store/_ids.py``); an invalid id therefore surfaces as a 422\nbefore any filesystem check runs, never as a false 404.",
+        "operationId": "export_graph_api_graphs__graph_id__export_get",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compile": {
+      "post": {
+        "tags": [
+          "compile"
+        ],
+        "summary": "Start Compile",
+        "description": "Start one compile job for a saved graph and return its id.\n\nThe job is registered (which enforces one live compile per graph) and\nits coroutine is scheduled as an asyncio task; this handler never\nawaits the compile, so the response returns as soon as the work is\nscheduled.\n\n``job.task`` is assigned before returning, and that assignment is\nload-bearing rather than bookkeeping: without it\n:meth:`~swarm_builder.compile.jobs.JobRegistry.cancel` has no task to\ncancel and the shutdown hook has nothing to await, so a ``DELETE``\nwould mark the job cancelled while the pipeline kept running.\n\nThe project directory is deliberately never created or cleared here.\n``pipeline.run_compile`` clears a stale one itself, *after* Phase 1\npasses, which is what keeps the \"a Phase-1 refusal leaves no project\ndirectory behind\" invariant true.\n\nRaises:\n    HTTPException: 404 if no such graph is saved; 422 for a\n        malformed/path-unsafe graph id or an unreadable graph file;\n        409 if a live compile already exists for this graph; 500 for\n        a filesystem failure while reading the graph; 503 if the\n        compile subsystem cannot be imported.",
+        "operationId": "start_compile_api_compile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartCompileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartCompileResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such graph"
+          },
+          "409": {
+            "description": "a compile is already live for this graph"
+          },
+          "503": {
+            "description": "the compile subsystem is unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compile/{compile_id}/events": {
+      "get": {
+        "tags": [
+          "compile"
+        ],
+        "summary": "Compile Events",
+        "description": "Stream one compile's events as SSE until it finishes.\n\nA reconnecting client sends ``Last-Event-ID`` and gets every retained\nevent strictly after that id, then live events. The response is\ndeliberately *finite*: it ends after the compile's terminal\n``done``/``error`` event, so a client's fetch reader completes\ninstead of hanging on a stream that will never produce another frame.\n\nRaises:\n    HTTPException: 404 for an unknown (or evicted) ``compile_id``;\n        400 when ``Last-Event-ID`` is not an integer, or when it\n        predates the retained log (the body then carries the gap\n        details and a snapshot URL); 503 if the compile subsystem\n        cannot be imported.",
+        "operationId": "compile_events_api_compile__compile_id__events_get",
+        "parameters": [
+          {
+            "name": "compile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Compile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "compile event stream",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Last-Event-ID predates the retained log"
+          },
+          "404": {
+            "description": "no such compile job"
+          },
+          "503": {
+            "description": "the compile subsystem is unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/compile/{compile_id}": {
+      "get": {
+        "tags": [
+          "compile"
+        ],
+        "summary": "Compile Status",
+        "description": "Return a compile's status snapshot.\n\nThis is the path a fresh tab uses: it has no ``Last-Event-ID`` and no\nway to reconstruct history, so the snapshot gives it the current\nstatus, the latest retained event id (which it can then use as a\ncursor), and the terminal result or error.\n\nRaises:\n    HTTPException: 404 for an unknown (or evicted) ``compile_id``;\n        503 if the compile subsystem cannot be imported.",
+        "operationId": "compile_status_api_compile__compile_id__get",
+        "parameters": [
+          {
+            "name": "compile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Compile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompileSnapshotResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such compile job"
+          },
+          "503": {
+            "description": "the compile subsystem is unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "compile"
+        ],
+        "summary": "Cancel Compile",
+        "description": "Cancel a live compile.\n\nThere is no subprocess to kill (PLAN.md fact 26): a compile is one\nasyncio task, so cancelling that task IS the whole mechanism, and the\njob ends ``cancelled``.\n\n**A job that already finished is a 409, not a no-op 200.** The\nrequest asks for a transition that is no longer possible and cannot\nbe retried into success, so the honest answer is a conflict naming\nthe status the job actually reached -- with the full snapshot in the\nbody, so the client needs no second request to learn the outcome it\nwas too late to prevent.\n\nRaises:\n    HTTPException: 404 for an unknown (or evicted) ``compile_id``;\n        409 if the job is no longer live; 503 if the compile\n        subsystem cannot be imported.",
+        "operationId": "cancel_compile_api_compile__compile_id__delete",
+        "parameters": [
+          {
+            "name": "compile_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Compile Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompileSnapshotResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such compile job"
+          },
+          "409": {
+            "description": "the compile has already finished"
+          },
+          "503": {
+            "description": "the compile subsystem is unavailable"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentSpec": {
+        "properties": {
+          "instructions": {
+            "type": "string",
+            "title": "Instructions"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tools"
+          },
+          "delegatesTo": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Delegatesto"
+          },
+          "outputSchema": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outputschema"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "instructions"
+        ],
+        "title": "AgentSpec",
+        "description": "Present on ``kind=\"agent\"`` nodes: instructions, tools, delegation,\nand optional structured output for the generated agent factory.\n\n``output_schema`` is a JSON Schema object. Its values are typed as\n``object`` rather than ``Any``: the *values* are arbitrary, but the\ncontainer is not, and ``Any`` would also silently accept a list or a\nscalar where a schema object was meant."
+      },
+      "BranchEdge": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "branch",
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "match": {
+            "type": "string",
+            "title": "Match"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "source",
+          "target",
+          "match"
+        ],
+        "title": "BranchEdge",
+        "description": "One arm of a decision's dispatch, drawn on the canvas from the\n``decision`` node to a branch target. ``match`` must correspond to\none entry in the decision node's :class:`DecisionSpec.branches`."
+      },
+      "CompileSnapshotResponse": {
+        "properties": {
+          "compileId": {
+            "type": "string",
+            "title": "Compileid"
+          },
+          "graphId": {
+            "type": "string",
+            "title": "Graphid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "succeeded",
+              "failed",
+              "cancelled"
+            ],
+            "title": "Status"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "Createdat"
+          },
+          "startedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Startedat"
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finishedat"
+          },
+          "latestEventId": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latesteventid"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "compileId",
+          "graphId",
+          "status",
+          "createdAt",
+          "startedAt",
+          "finishedAt",
+          "latestEventId",
+          "result",
+          "error"
+        ],
+        "title": "CompileSnapshotResponse",
+        "description": "Body of ``GET``/``DELETE /api/compile/{compile_id}``.\n\nMirrors :meth:`~swarm_builder.compile.jobs.Job.snapshot`'s dict\none-for-one, including ``latestEventId`` -- the value a fresh client\npasses back as ``Last-Event-ID`` when it wants to resume rather than\nreplay from the start."
+      },
+      "DecisionBranch": {
+        "properties": {
+          "match": {
+            "type": "string",
+            "title": "Match"
+          },
+          "targetNodeId": {
+            "type": "string",
+            "title": "Targetnodeid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "match",
+          "targetNodeId"
+        ],
+        "title": "DecisionBranch",
+        "description": "One branch of a :class:`DecisionSpec`: a match value and the node\nit dispatches to. ``target_node_id`` must also be the target of a\n``branch`` :class:`SwarmEdge` with a matching ``match`` string."
+      },
+      "DecisionSpec": {
+        "properties": {
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionBranch"
+            },
+            "type": "array",
+            "title": "Branches"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "DecisionSpec",
+        "description": "Present on ``kind=\"decision\"`` nodes: the branch dispatch table.\n\n**Data does not pass through a decision node.** A branch\ntarget step receives, via ``ctx.inputs``, the *match value returned\nby the decision's source step* -- not the payload that flowed into\nthat source step. Concretely: if the source step returns\n``Literal[\"big\", \"small\"]``, the ``big`` branch target observes\n``ctx.inputs == \"big\"``, never the original pre-classification\nstring. Two consequences that hold regardless of what Phase 1 (Group\n2's review.py) enforces mechanically:\n\n- a branch target's declared :class:`NodeIo.input_type` must equal\n  the **decision's source step's** ``output_type``, never any node\n  further upstream;\n- a workflow that needs the pre-classification payload inside a\n  branch target must carry it through ``State`` explicitly (the\n  classifying step writes a state field the branch target reads);\n  ``ctx.inputs`` will never carry it through the decision.\n\nTwo consequences for the emitted code, both enforced elsewhere: the\nfull ``.branch(...)`` chain must be emitted before the ``add_edge``\nthat targets this decision (``emit_graph.py``), and branch targets'\ndeclared input types must match the source step's output type, not any\nnode further upstream (``review.py``)."
+      },
+      "DelegateEdge": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "delegate",
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "source",
+          "target"
+        ],
+        "title": "DelegateEdge",
+        "description": "A delegation link from an orchestrator node to a child agent node.\n\n**Never emitted as an ``add_edge``.** The child is called as an agent\n*tool*, not executed as a graph step; emitting a real edge would run it\ntwice. This edge kind exists purely so the canvas can draw the\nrelationship and the Inspector can show it: ``emit_graph.py`` skips\nevery ``delegate`` edge, and Phase 1 rejects a node that is both a\n``delegate`` target and a ``seq``/``branch`` target."
+      },
+      "DeleteGraphResponse": {
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          },
+          "projectDeleted": {
+            "type": "boolean",
+            "title": "Projectdeleted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "deleted",
+          "projectDeleted"
+        ],
+        "title": "DeleteGraphResponse",
+        "description": "The outcome of a delete, including whether a project was removed too."
+      },
+      "ExportResponse": {
+        "properties": {
+          "projectPath": {
+            "type": "string",
+            "title": "Projectpath"
+          },
+          "runCommand": {
+            "type": "string",
+            "title": "Runcommand"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projectPath",
+          "runCommand"
+        ],
+        "title": "ExportResponse",
+        "description": "Where the compiled project lives and how to run it."
+      },
+      "FanoutEdge": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "fanout",
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "joinNodeId": {
+            "type": "string",
+            "title": "Joinnodeid"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "source",
+          "target",
+          "joinNodeId"
+        ],
+        "title": "FanoutEdge",
+        "description": "One arm of a multi-successor fan-out.\n\n``join_node_id`` names the ``join`` node this arm must converge on.\nIt is required rather than optional because a plain multi-successor\n``add_edge`` pair is silently lossy: ``build()`` accepts it, and only\none arbitrary branch's value survives without an explicit join."
+      },
+      "FindingOut": {
+        "properties": {
+          "code": {
+            "type": "string",
+            "title": "Code"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "nodeIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Nodeids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "nodeIds"
+        ],
+        "title": "FindingOut",
+        "description": "One review finding, as the canvas Inspector displays it."
+      },
+      "GraphListError": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "detail"
+        ],
+        "title": "GraphListError",
+        "description": "A graph file that exists on disk but could not be read or validated.\n\nReported alongside the valid rows rather than replacing them, so one\ncorrupt file never hides every other saved graph."
+      },
+      "GraphListResponse": {
+        "properties": {
+          "graphs": {
+            "items": {
+              "$ref": "#/components/schemas/GraphSummary"
+            },
+            "type": "array",
+            "title": "Graphs"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/GraphListError"
+            },
+            "type": "array",
+            "title": "Errors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "graphs",
+          "errors"
+        ],
+        "title": "GraphListResponse",
+        "description": "The full ``GET /api/graphs`` response body.\n\n``errors`` is non-empty only when individual files failed; the request\nitself still succeeded."
+      },
+      "GraphSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updatedat"
+          },
+          "nodeCount": {
+            "type": "integer",
+            "title": "Nodecount"
+          },
+          "edgeCount": {
+            "type": "integer",
+            "title": "Edgecount"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "updatedAt",
+          "nodeCount",
+          "edgeCount"
+        ],
+        "title": "GraphSummary",
+        "description": "One row of the graph list: enough for a picker, none of the document."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "HealthResponse": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "dshHome": {
+            "type": "string",
+            "title": "Dshhome"
+          },
+          "settingsError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Settingserror"
+          },
+          "resolvedModel": {
+            "$ref": "#/components/schemas/ResolvedModelSummary"
+          },
+          "uvAvailable": {
+            "type": "boolean",
+            "title": "Uvavailable"
+          },
+          "uvCacheDir": {
+            "type": "string",
+            "title": "Uvcachedir"
+          },
+          "uvCacheWritable": {
+            "type": "boolean",
+            "title": "Uvcachewritable"
+          },
+          "workspaceDir": {
+            "type": "string",
+            "title": "Workspacedir"
+          },
+          "workspaceWritable": {
+            "type": "boolean",
+            "title": "Workspacewritable"
+          },
+          "webDistPresent": {
+            "type": "boolean",
+            "title": "Webdistpresent"
+          },
+          "compileReady": {
+            "type": "boolean",
+            "title": "Compileready"
+          },
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Blockers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "dshHome",
+          "settingsError",
+          "resolvedModel",
+          "uvAvailable",
+          "uvCacheDir",
+          "uvCacheWritable",
+          "workspaceDir",
+          "workspaceWritable",
+          "webDistPresent",
+          "compileReady",
+          "blockers"
+        ],
+        "title": "HealthResponse",
+        "description": "The full ``GET /api/health`` response body."
+      },
+      "JoinEdge": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "join",
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "source",
+          "target"
+        ],
+        "title": "JoinEdge",
+        "description": "An edge from a fan-out arm's target into the ``join`` node."
+      },
+      "JoinSpec": {
+        "properties": {
+          "reducer": {
+            "type": "string",
+            "enum": [
+              "list_append",
+              "list_extend",
+              "dict_update",
+              "sum"
+            ],
+            "title": "Reducer"
+          },
+          "initialFactory": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "list",
+                  "dict",
+                  "int"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Initialfactory"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "reducer"
+        ],
+        "title": "JoinSpec",
+        "description": "Present on ``kind=\"join\"`` nodes: the fan-in reducer.\n\n``initial_factory`` names the Python builtin the emitter passes as\n``builder.join(..., initial_factory=...)``. When unset, the emitter\nderives it from ``reducer`` (``list_append``/``list_extend`` ->\n``list``, ``dict_update`` -> ``dict``, ``sum`` -> ``int``); set it\nexplicitly only to override that default."
+      },
+      "ModelInfoOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "ModelInfoOut",
+        "description": "One entry of a route's explicit model list, as the picker sees it."
+      },
+      "ModelSelection": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "reasoningEffort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoningeffort"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "provider",
+          "model"
+        ],
+        "title": "ModelSelection",
+        "description": "One inherited route, resolved to something PydanticAI can\nconstruct (facts 21-24). Absent on :class:`SwarmGraph` means\n\"inherit the resolved default\" rather than \"no model\"."
+      },
+      "ModelsResponse": {
+        "properties": {
+          "routes": {
+            "items": {
+              "$ref": "#/components/schemas/RouteOut"
+            },
+            "type": "array",
+            "title": "Routes"
+          },
+          "resolvedDefault": {
+            "$ref": "#/components/schemas/ResolvedDefaultOut"
+          },
+          "settingsError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Settingserror"
+          }
+        },
+        "type": "object",
+        "required": [
+          "routes",
+          "resolvedDefault",
+          "settingsError"
+        ],
+        "title": "ModelsResponse",
+        "description": "The full ``GET /api/models`` response body."
+      },
+      "NodeIo": {
+        "properties": {
+          "inputType": {
+            "type": "string",
+            "enum": [
+              "str",
+              "json",
+              "list[str]"
+            ],
+            "title": "Inputtype"
+          },
+          "outputType": {
+            "type": "string",
+            "enum": [
+              "str",
+              "json",
+              "list[str]"
+            ],
+            "title": "Outputtype"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "inputType",
+          "outputType"
+        ],
+        "title": "NodeIo",
+        "description": "A node's declared input/output port types.\n\nPhase 1 review uses these to reject a port-type mismatch across an\nedge and, for a decision's branch targets, to enforce that the\ntarget's ``input_type`` equals the decision's *source step's*\n``output_type`` -- see :class:`DecisionSpec` for why the source step is\nthe relevant node rather than the decision itself."
+      },
+      "Position": {
+        "properties": {
+          "x": {
+            "type": "number",
+            "title": "X"
+          },
+          "y": {
+            "type": "number",
+            "title": "Y"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "x",
+          "y"
+        ],
+        "title": "Position",
+        "description": "Canvas coordinates for a node. Presentation-only: never read by\nthe emitter, kept purely so the canvas restores node placement."
+      },
+      "ProgrammaticSpec": {
+        "properties": {
+          "needs": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Needs"
+          },
+          "signatureHint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signaturehint"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ProgrammaticSpec",
+        "description": "Present on ``kind=\"programmatic\"`` nodes: plain-Python steps with\nno agent. ``needs`` are extra package requirements the scaffolder\nunions into the generated ``pyproject.toml``; ``signature_hint`` is\nfree-text guidance the fill agent reads (never executed or parsed)."
+      },
+      "ResolvedDefaultOut": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "source"
+        ],
+        "title": "ResolvedDefaultOut",
+        "description": "The model a compile would use right now, plus where that came from."
+      },
+      "ResolvedModelSummary": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "source"
+        ],
+        "title": "ResolvedModelSummary",
+        "description": "The subset of :class:`~swarm_builder.inherit.settings.EffectiveModel`\nthat is meaningful to a health check. ``reasoning_effort``,\n``base_url``, ``api_key_env``, and ``route`` are internal resolution\ndetail and are intentionally dropped here (the picker-facing detail\nlives in ``/api/models`` instead)."
+      },
+      "ReviewResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/FindingOut"
+            },
+            "type": "array",
+            "title": "Errors"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/FindingOut"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "errors",
+          "warnings"
+        ],
+        "title": "ReviewResponse",
+        "description": "The Phase-1 review outcome: a pass/fail flag plus every finding."
+      },
+      "RouteOut": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "api": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api"
+          },
+          "hasExplicitModels": {
+            "type": "boolean",
+            "title": "Hasexplicitmodels"
+          },
+          "emission": {
+            "type": "string",
+            "title": "Emission"
+          },
+          "requiredExtra": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requiredextra"
+          },
+          "unmappableReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unmappablereason"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelInfoOut"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "api",
+          "hasExplicitModels",
+          "emission",
+          "requiredExtra",
+          "unmappableReason",
+          "models"
+        ],
+        "title": "RouteOut",
+        "description": "One configured route, with the picker-relevant classification fields.\n\n``emission``/``required_extra``/``unmappable_reason`` are the outcome\nof :func:`swarm_builder.inherit.routes.classify_route`, exposed so the\npicker can disable or explain an unusable route before a compile is\nattempted."
+      },
+      "SeqEdge": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "const": "seq",
+            "title": "Kind"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "target": {
+            "type": "string",
+            "title": "Target"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "kind",
+          "id",
+          "source",
+          "target"
+        ],
+        "title": "SeqEdge",
+        "description": "A plain sequential edge: ``builder.add_edge(source, target)``."
+      },
+      "StartCompileRequest": {
+        "properties": {
+          "graphId": {
+            "type": "string",
+            "title": "Graphid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "graphId"
+        ],
+        "title": "StartCompileRequest",
+        "description": "Body of ``POST /api/compile``."
+      },
+      "StartCompileResponse": {
+        "properties": {
+          "compileId": {
+            "type": "string",
+            "title": "Compileid"
+          }
+        },
+        "type": "object",
+        "required": [
+          "compileId"
+        ],
+        "title": "StartCompileResponse",
+        "description": "Body of a successful ``POST /api/compile``.\n\nOnly the id: the compile itself runs in the background and reports\neverything else through the event stream and the status snapshot."
+      },
+      "StateField": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "str",
+              "json",
+              "list[str]"
+            ],
+            "title": "Type"
+          },
+          "default": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "type"
+        ],
+        "title": "StateField",
+        "description": "One field of the generated workflow's ``@dataclass State``.\n\n``type`` goes through :data:`PORT_TYPE_ANNOTATIONS` like any other\nport type when the emitter writes the dataclass field.\n``default`` is literal Python source for the field's default value\n(e.g. ``'\"\"'`` or ``\"0\"``); ``None`` means the emitter writes a bare\n``name: type`` line with no default."
+      },
+      "SwarmGraph": {
+        "properties": {
+          "version": {
+            "type": "integer",
+            "const": 1,
+            "title": "Version",
+            "default": 1
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "entryNodeId": {
+            "type": "string",
+            "title": "Entrynodeid"
+          },
+          "exitNodeId": {
+            "type": "string",
+            "title": "Exitnodeid"
+          },
+          "stateFields": {
+            "items": {
+              "$ref": "#/components/schemas/StateField"
+            },
+            "type": "array",
+            "title": "Statefields"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/SwarmNode"
+            },
+            "type": "array",
+            "title": "Nodes"
+          },
+          "edges": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/SeqEdge"
+                },
+                {
+                  "$ref": "#/components/schemas/BranchEdge"
+                },
+                {
+                  "$ref": "#/components/schemas/FanoutEdge"
+                },
+                {
+                  "$ref": "#/components/schemas/JoinEdge"
+                },
+                {
+                  "$ref": "#/components/schemas/DelegateEdge"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "kind",
+                "mapping": {
+                  "branch": "#/components/schemas/BranchEdge",
+                  "delegate": "#/components/schemas/DelegateEdge",
+                  "fanout": "#/components/schemas/FanoutEdge",
+                  "join": "#/components/schemas/JoinEdge",
+                  "seq": "#/components/schemas/SeqEdge"
+                }
+              }
+            },
+            "type": "array",
+            "title": "Edges"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelSelection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updatedat"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "entryNodeId",
+          "exitNodeId",
+          "updatedAt"
+        ],
+        "title": "SwarmGraph",
+        "description": "The complete canvas save file: nodes, edges, state shape, and the\noptional per-workflow model override. ``version`` is fixed at ``1``\nfor this schema generation; a future incompatible shape change ships\nas ``version=2`` plus a migration, not a silent field rename."
+      },
+      "SwarmNode": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "programmatic",
+              "decision",
+              "join"
+            ],
+            "title": "Kind"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "intent": {
+            "type": "string",
+            "title": "Intent"
+          },
+          "position": {
+            "$ref": "#/components/schemas/Position"
+          },
+          "template": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "chat",
+                  "orchestrator",
+                  "websearch"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Template"
+          },
+          "io": {
+            "$ref": "#/components/schemas/NodeIo"
+          },
+          "reads": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reads"
+          },
+          "writes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Writes"
+          },
+          "agent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "programmatic": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProgrammaticSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "join": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JoinSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "intent",
+          "position",
+          "io"
+        ],
+        "title": "SwarmNode",
+        "description": "One canvas node.\n\n``id`` is emitted verbatim as the ``node_id=`` argument to\n``builder.step``/``builder.decision``/``builder.join`` and as the step\nmodule's filename, so it must already be a valid, unique Python\nidentifier. The frontend is responsible for deriving it from ``title``\nvia :func:`swarm_builder.slugify.slugify_titles` and keeping it stable\nacross edits: duplicate titles deduplicate with a numeric suffix, and\nthe title-to-id mapping must stay stable across recompiles or a\nrecompile would rename step modules instead of updating them.\n\nExactly one of ``agent`` / ``programmatic`` / ``decision`` / ``join``\nis expected to be set, matching ``kind`` -- enforced by Phase 1\n(``review.py``), not here, since that cross-field rule belongs with the\nrest of the structural graph validation."
+      },
+      "TemplateEntryOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "defaultTools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Defaulttools"
+          },
+          "requiredEnv": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Requiredenv"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "label",
+          "description",
+          "defaultTools",
+          "requiredEnv"
+        ],
+        "title": "TemplateEntryOut",
+        "description": "The five picker-facing fields of one template catalog entry.\n\n``deps`` and ``file_manifest`` are internal scaffolding concerns the\npicker has no use for, so they are deliberately not exposed."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  }
+}

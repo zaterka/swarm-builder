@@ -1,0 +1,52 @@
+# Docker build context for Swarm Builder.
+#
+# Without this file the context includes .pnpm-store (241 MB), .cache
+# (135 MB), node_modules, .venv, the uv cache, saved graphs, and .git --
+# hundreds of megabytes uploaded to the daemon on every build, for files
+# the image never reads.
+
+# --- Version control and editor state ---
+.git
+.gitignore
+.claude
+
+# --- Python ---
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# --- Node ---
+node_modules/
+**/node_modules/
+.pnpm-store/
+
+# --- Caches ---
+.cache/
+.uv-cache/
+.npm-cache/
+
+# --- Frontend build output: rebuilt in stage 1 from source, so the
+# committed copy must not shadow it. ---
+web/dist/
+web/tsconfig.tsbuildinfo
+
+# --- Runtime data: saved graphs and generated projects are mounted at
+# runtime, never baked into the image. ---
+workspace/
+exports/
+
+# --- Research and scratch: the Group 0 spike projects carry their own
+# lockfiles and virtualenvs and are not part of the shipped app. ---
+spike/
+
+# --- Local planning notes, not application code ---
+PLAN-DOCKER.md
+GROUP2_PLAN.md
+GROUP3_PLAN.md
+GROUP6_PLAN.md
+TASK_PLAN_inherit_settings.md

@@ -1,0 +1,37 @@
+"""Agent factory for the ``$node_id`` step (template: orchestrator).
+
+Per PLAN.md I1: an orchestrator's children are called as agent **tool
+functions**, never as graph steps -- ``emit_graph.py`` deliberately
+emits no ``add_edge`` for a ``DelegateEdge``. This factory wraps each
+child named in ``agent.delegates_to`` as a tool the parent agent can
+call, built from the *same* ``model`` this factory receives (so the
+whole delegation chain still respects the ``ctx.deps.model`` seam and
+the ``TestModel`` dry run stays keyless).
+"""
+
+from __future__ import annotations
+
+from pydantic_ai import Agent
+from pydantic_ai.models import Model
+$output_type_import
+
+$delegate_imports
+
+$imports_begin
+$imports_end
+
+
+def build_agent(model: Model | str) -> Agent[None, $output_annotation]:
+    """Build (never at import time) the ``$node_id`` orchestrator agent."""
+    $body_begin
+    agent = Agent(
+        model,
+        output_type=$output_annotation,
+        instructions=$instructions_repr,
+        defer_model_check=True,
+    )
+
+$delegate_tool_defs
+
+    return agent
+    $body_end

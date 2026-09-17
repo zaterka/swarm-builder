@@ -1,0 +1,9 @@
+llm-pi-ai:
+  providers:
+    kornerstone:
+      api: openai-completions
+      models: [
+        - id: qwen38-27b-fp8
+          name: Qwen 3.8-27B
+    amazon-bedrock
+      awsProfile: factored-dev-profile

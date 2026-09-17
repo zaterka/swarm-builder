@@ -1,0 +1,7 @@
+llm-pi-ai:
+  providers:
+    - kornerstone
+    - amazon-bedrock
+agent-default-model:
+  provider: amazon-bedrock
+  model: us.anthropic.claude-opus-5

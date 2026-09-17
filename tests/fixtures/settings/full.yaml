@@ -1,0 +1,36 @@
+ui-onboarding:
+  welcomeNoticeVersion: 2026-08-13.1
+llm-pi-ai:
+  providers:
+    kornerstone:
+      api: openai-completions
+      baseURL: http://localhost:8000/v1
+      models:
+        - id: qwen38-27b-fp8
+          name: Qwen 3.8-27B
+        - id: deepseek-v4-flash
+          name: Deepseek-v4-Flash
+      apiKeyEnv: KORNERSTONE_API_KEY
+    amazon-bedrock:
+      awsProfile: factored-dev-profile
+      awsRegion: us-east-1
+      models:
+        - id: us.anthropic.claude-opus-5
+          name: Claude Opus 5 (US)
+          contextWindow: 1000000
+          maxTokens: 128000
+        - id: us.anthropic.claude-sonnet-5
+          name: Claude Sonnet 5 (US)
+          contextWindow: 1000000
+          maxTokens: 128000
+agent-default-model:
+  provider: amazon-bedrock
+  model: us.anthropic.claude-opus-5
+agent-presets:
+  default: dev-mode
+ui-theme:
+  preference: system
+dev-mode-pipeline:
+  planReview: {provider: amazon-bedrock, model: "us.anthropic.claude-opus-5"}
+  implement: {provider: amazon-bedrock, model: "us.anthropic.claude-sonnet-5"}
+  codeReview: {provider: amazon-bedrock, model: "us.anthropic.claude-opus-5"}

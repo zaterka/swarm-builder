@@ -1,0 +1,8 @@
+llm-pi-ai:
+  providers:
+    kornerstone:
+      api: openai-completions
+      baseURL: http://localhost:8000/v1
+      apiKeyEnv: KORNERSTONE_API_KEY
+    plain-route:
+      baseURL: http://localhost:9000/v1

@@ -1,0 +1,35 @@
+"""Agent factory for the ``$node_id`` step (template: chat).
+
+Per the shared agent contract (PLAN.md "Templates" / codegen contract
+rule 3): no module constructs an ``Agent`` at import time. The model
+always arrives from ``ctx.deps.model`` inside the step body, which is
+what lets the validation dry run inject ``TestModel()``.
+"""
+
+from __future__ import annotations
+
+from pydantic_ai import Agent
+from pydantic_ai.models import Model
+$output_type_import
+
+$imports_begin
+$imports_end
+
+
+def build_agent(model: Model | str) -> Agent[None, $output_annotation]:
+    """Build (never at import time) the ``$node_id`` agent for this model.
+
+    The agent's ``output_type`` is the node's declared output port type,
+    so the value the step returns matches the annotation ``graph.py``
+    wires the step with. Hardcoding ``str`` here silently produced a
+    ``str`` for a node declaring a ``json`` port, which the Phase-5 dry
+    run then rejected.
+    """
+    $body_begin
+    return Agent(
+        model,
+        output_type=$output_annotation,
+        instructions=$instructions_repr,
+        defer_model_check=True,
+    )
+    $body_end

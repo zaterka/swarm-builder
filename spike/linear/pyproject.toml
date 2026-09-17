@@ -1,0 +1,14 @@
+[project]
+name = "swarm-workflow"
+version = "0.1.0"
+description = "Swarm Builder spike: linear workflow (known-name bedrock model path)."
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "pydantic-ai-slim==2.43.0",
+    "pydantic-graph==2.43.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

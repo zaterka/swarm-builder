@@ -1,0 +1,122 @@
+/* Hand-drawn / excalidraw-ish theme (PLAN.md "Frontend" -> "Canvas":
+   "the hand-drawn feel comes from CSS only ... so graph semantics stay
+   typed and validated rather than free-form"). No visual state here is
+   ever persisted in the graph document -- every rule below is purely
+   presentational, keyed off stable inputs (a node's own id) so the
+   jitter doesn't re-randomize on every re-render. */
+
+:root {
+  --sb-ink: #2b2b2b;
+  --sb-paper: #fffdf7;
+  --sb-agent: #3b6ea5;
+  --sb-programmatic: #6a7f3b;
+  --sb-decision: #a5673b;
+  --sb-join: #7a4f9e;
+  --sb-delegate: #8a8a8a;
+  --sb-font-hand: 'Comic Sans MS', 'Segoe Print', cursive, sans-serif;
+}
+
+.sb-canvas-pane {
+  background-color: var(--sb-paper);
+  background-image: radial-gradient(circle, #cfcabf 1px, transparent 1.4px);
+  background-size: 18px 18px;
+  font-family: var(--sb-font-hand);
+}
+
+/* The rotation jitter goes on this INNER wrapper only, never on
+   `.react-flow__node` itself -- rotating the RF-measured outer element
+   would desync handle positions from connection hit-testing
+   (GROUP6_PLAN.md review finding E4). Each node component sets
+   `--sb-jitter` inline, computed from a stable hash of the node's id. */
+.sb-node-sketch {
+  transform: rotate(var(--sb-jitter, 0deg));
+  border: 2px solid var(--sb-ink);
+  background: var(--sb-paper);
+  padding: 8px 10px;
+  min-width: 160px;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.15);
+  font-family: var(--sb-font-hand);
+}
+
+.sb-node-sketch.sb-kind-agent {
+  border-color: var(--sb-agent);
+  border-radius: 14px 4px 14px 4px;
+}
+.sb-node-sketch.sb-kind-programmatic {
+  border-color: var(--sb-programmatic);
+  border-radius: 4px;
+  border-style: dashed;
+}
+.sb-node-sketch.sb-kind-decision {
+  border-color: var(--sb-decision);
+  border-radius: 4px 16px 4px 16px;
+}
+.sb-node-sketch.sb-kind-join {
+  border-color: var(--sb-join);
+  border-radius: 20px;
+  border-width: 3px;
+  border-style: double;
+}
+
+.sb-node-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: bold;
+  letter-spacing: 0.05em;
+  padding: 1px 5px;
+  border-radius: 6px;
+  color: white;
+  margin-bottom: 4px;
+}
+.sb-kind-agent .sb-node-badge { background: var(--sb-agent); }
+.sb-kind-programmatic .sb-node-badge { background: var(--sb-programmatic); }
+.sb-kind-decision .sb-node-badge { background: var(--sb-decision); }
+.sb-kind-join .sb-node-badge { background: var(--sb-join); }
+
+.sb-node-corner-tag {
+  position: absolute;
+  top: -10px;
+  left: -6px;
+  font-size: 9px;
+  font-weight: bold;
+  background: var(--sb-ink);
+  color: white;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.sb-node-title {
+  font-weight: bold;
+  font-size: 13px;
+  color: var(--sb-ink);
+}
+.sb-node-intent-preview {
+  font-size: 11px;
+  color: #555;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Edge styling per kind -- seq solid, branch solid+labeled, fanout/join
+   solid sharing a color, delegate dashed (I1's semantic signal: "called
+   as a tool, not a step"). */
+.sb-edge-seq path { stroke: var(--sb-ink); stroke-width: 2; }
+.sb-edge-branch path { stroke: var(--sb-decision); stroke-width: 2; }
+.sb-edge-fanout path,
+.sb-edge-join path { stroke: var(--sb-join); stroke-width: 2; }
+.sb-edge-delegate path {
+  stroke: var(--sb-delegate);
+  stroke-width: 2;
+  stroke-dasharray: 6 4;
+}
+
+.sb-edge-label {
+  font-family: var(--sb-font-hand);
+  font-size: 11px;
+  background: var(--sb-paper);
+  padding: 1px 4px;
+  border: 1px solid var(--sb-ink);
+  border-radius: 4px;
+}

@@ -1,0 +1,93 @@
+# Swarm Builder, containerized.
+#
+#   docker compose up --build
+#
+# Then open http://127.0.0.1:8420 — the same URL and port as the non-Docker
+# path, so nothing about the app changes for you.
+#
+# Two deliberate choices worth reading before you edit this file:
+#
+# 1. `ports` publishes to 127.0.0.1, not 0.0.0.0. The container must bind
+#    0.0.0.0 internally (a loopback bind inside a container is unreachable
+#    through a published port), but the app has **no authentication** and
+#    assumes a single trusted user. Restoring the restriction at the
+#    publish layer is what keeps that assumption true; publishing
+#    0.0.0.0:8420 would expose an unauthenticated app to your network.
+#
+# 2. `~/.aws` and `~/.dsh` are mounted **read-write on purpose**. Read-only
+#    looks safer but breaks real compiles: boto3 refreshes AWS SSO tokens
+#    by writing into `~/.aws/sso/cache`. A container with write access to
+#    your credential chain is a real property of this setup, not a detail
+#    to hide.
+
+services:
+  swarm-builder:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: swarm-builder:local
+
+    ports:
+      # Loopback only — see note 1 above.
+      - "127.0.0.1:8420:8420"
+
+    environment:
+      # Required inside a container; the image sets it, repeated here so
+      # this file is self-documenting and overridable.
+      SWARM_HOST: "0.0.0.0"
+      PORT: "8420"
+      DSH_HOME: /home/app/.dsh
+      HOME: /home/app
+      SWARM_WORKSPACE: /workspace
+      UV_CACHE_DIR: /uv-cache
+      PYTHONUNBUFFERED: "1"
+
+      # Inherited from your shell (or a .env file next to this one) so the
+      # container authenticates as you. Bedrock routes need a profile;
+      # set AWS_PROFILE in your shell before `docker compose up`, or put
+      # it in .env.
+      AWS_PROFILE: "${AWS_PROFILE:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+
+      # Empty by default, so a real model-backed compile runs. Set
+      # SWARM_FAKE_FILL=1 in your shell before `docker compose up` for a
+      # full five-phase compile with **no model, no credentials and no
+      # ~/.dsh** — the fastest way to confirm the container works before
+      # wiring anything up:
+      #
+      #     SWARM_FAKE_FILL=1 docker compose up --build
+      SWARM_FAKE_FILL: "${SWARM_FAKE_FILL:-}"
+
+    volumes:
+      # Harness settings: model-route inheritance. Read per compile, so
+      # edits on the host take effect without restarting the container.
+      - "${HOME}/.dsh:/home/app/.dsh"
+      # Provider credentials. Read-write, and required to be — see note 2.
+      # Both directories must already exist on the host: if they do not,
+      # Docker creates them as root-owned empty directories and the
+      # container will silently find no settings and no credentials.
+      - "${HOME}/.aws:/home/app/.aws"
+      # Saved graphs and generated projects, so you can read and run an
+      # export from the host. Holds portable artefacts only: sources,
+      # uv.lock, and the golden diagram. The generated project's .venv
+      # lives in the `venvs` volume, never here — see note 3.
+      - "./workspace:/workspace"
+      # Named volumes, never bind mounts onto host paths: a Linux wheel
+      # cache or venv mounted onto macOS half-works, because pure-Python
+      # dependencies still import while compiled ones fail with
+      # `bad CPU type`.
+      - "uv-cache:/uv-cache"
+      - "venvs:/venvs"
+
+    # A compile can be mid-flight when you stop the stack. This gives the
+    # app's lifespan hook time to cancel the running job before SIGKILL,
+    # so `docker compose down` stops a compile rather than orphaning it.
+    stop_grace_period: 45s
+
+    # No `restart:` on purpose: if the container exits because a route is
+    # unusable, a restart loop would hide the error in the logs instead of
+    # leaving it visible.
+
+volumes:
+  uv-cache:
+  venvs:

@@ -1,0 +1,148 @@
+.sb-app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+.sb-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #ccc;
+  background: #f5f2ea;
+}
+
+.sb-graph-name {
+  font-weight: bold;
+}
+
+.sb-save-status {
+  margin-left: auto;
+  font-size: 12px;
+  color: #555;
+}
+
+.sb-workspace {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 160px 1fr 320px;
+  min-height: 0;
+}
+
+.sb-palette-pane {
+  border-right: 1px solid #ccc;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.sb-canvas-pane-wrapper {
+  min-width: 0;
+}
+
+.sb-inspector-pane {
+  border-left: 1px solid #ccc;
+  padding: 8px;
+  overflow-y: auto;
+}
+
+.sb-compile-drawer {
+  border-top: 1px solid #ccc;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.sb-palette-item {
+  border: 1px solid #999;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  cursor: grab;
+}
+
+.sb-finding {
+  padding: 4px 6px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  cursor: pointer;
+}
+.sb-finding-error {
+  background: #fde2e2;
+  border: 1px solid #c0392b;
+}
+.sb-finding-warning {
+  background: #fff4d6;
+  border: 1px solid #b8860b;
+}
+/* A finding that references graph nodes is rendered as a real button (it
+   selects those nodes when activated, so it must be keyboard reachable);
+   these rules only strip the browser's default button chrome so it keeps the
+   same look as the non-interactive findings. Background/border stay with
+   .sb-finding-* above. */
+button.sb-finding {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  padding: 4px 6px;
+}
+
+.sb-phase-list {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.sb-phase-pending {
+  color: #888;
+}
+.sb-phase-succeeded {
+  color: #1e7b34;
+}
+.sb-phase-failed {
+  color: #c0392b;
+}
+.sb-phase-retry {
+  color: #b8860b;
+}
+
+.sb-fact27-callout {
+  background: #eef4ff;
+  border: 1px solid #3b6ea5;
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.sb-hint {
+  font-size: 11px;
+  color: #666;
+}
+
+.sb-log-tail {
+  max-height: 200px;
+  overflow-y: auto;
+  background: #111;
+  color: #eee;
+  padding: 6px;
+  font-size: 11px;
+}
+
+.sb-inspector-tabs button.sb-tab-active {
+  font-weight: bold;
+  text-decoration: underline;
+}
+
+.sb-node-id-hint {
+  font-size: 11px;
+  color: #888;
+  margin-bottom: 8px;
+}
+
+.sb-entry-exit-controls {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 8px;
+}

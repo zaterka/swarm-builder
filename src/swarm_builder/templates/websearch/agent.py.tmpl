@@ -1,0 +1,42 @@
+"""Agent factory for the ``$node_id`` step (template: websearch).
+
+**Re-probed against the pinned 2.43.0 wheel and found to differ from
+PLAN.md fact 9** (see GROUP2_PLAN.md's final report for the full
+write-up): fact 9 says ``toolsets=[WebSearchTool(...)]`` is the correct
+call site. Constructing an ``Agent`` that way DOES succeed (fact 9's
+construction-time claim holds), but calling ``.run()`` on it raises
+``TypeError: 'WebSearchTool' object is not callable`` -- `toolsets=`
+expects toolset objects/factories, and ``WebSearchTool`` is not one (it
+is an ``AbstractNativeTool``, unrelated to ``AbstractToolset``).
+
+The verified-working construction is ``capabilities=[NativeTool(...)]``
+from ``pydantic_ai.capabilities`` (confirmed against the installed
+2.43.0 wheel: ``Agent(model, capabilities=[NativeTool(WebSearchTool())])``
+constructs AND runs). ``builtin_tools=`` still does not exist (fact 9
+half still holds) and plain ``tools=[WebSearchTool()]`` still raises
+``AttributeError`` (fact 9's other half also still holds) -- only the
+*correct* call site changed from what PLAN.md documented.
+"""
+
+from __future__ import annotations
+
+from pydantic_ai import Agent, WebSearchTool
+from pydantic_ai.capabilities import NativeTool
+from pydantic_ai.models import Model
+$output_type_import
+
+$imports_begin
+$imports_end
+
+
+def build_agent(model: Model | str) -> Agent[None, $output_annotation]:
+    """Build (never at import time) the ``$node_id`` research agent."""
+    $body_begin
+    return Agent(
+        model,
+        output_type=$output_annotation,
+        instructions=$instructions_repr,
+        capabilities=[NativeTool(WebSearchTool(optional=True))],
+        defer_model_check=True,
+    )
+    $body_end

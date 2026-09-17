@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+
+# Build output -- but NOT web/dist, which is committed on purpose.
+#
+# The server serves the canvas from web/dist and shows a "frontend has
+# not been built yet" message when it is absent, so a clone that lacks it
+# cannot render the UI without Node and pnpm. Shipping the built bundle
+# is what makes `uv run swarm-builder` the entire quickstart: see
+# scripts/check_dist.py for the staleness guard that keeps it honest, and
+# README.md for the maintainer rebuild step.
+dist/
+!web/dist/
+!web/dist/**
+
+# Local caches and scratch state
+.uv-cache/
+.npm-cache/
+.cache/
+.pnpm-store/
+
+# Runtime data: saved graphs and generated projects
+workspace/

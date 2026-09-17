@@ -1,0 +1,46 @@
+[project]
+name = "swarm-builder"
+version = "0.1.0"
+description = "Visual canvas for building, compiling, and exporting PydanticAI agent workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn==0.53.0",
+    "sse-starlette==3.4.11",
+    "pyyaml==6.0.3",
+    "pydantic-ai-slim[bedrock,openai]==2.43.0",
+]
+
+[project.scripts]
+swarm-builder = "swarm_builder.main:run"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.16.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+extend-exclude = ["spike", ".uv-cache", "workspace"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Registered here rather than in conftest.py now that no group owns this
+# file concurrently. Not deselected by default: a bare `uv run pytest` is
+# meant to exercise the real uv-sync-based codegen and validation gates,
+# which are the suite's most valuable tests. Use `-m "not slow"` for a
+# fast loop.
+markers = [
+    "slow: exercises uv sync + a real subprocess; deselect with -m 'not slow'",
+]

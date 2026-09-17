@@ -1,0 +1,15 @@
+stateDiagram-v2
+  classify
+  state decision <<choice>>
+  note right of decision
+    classify by length
+  end note
+  big
+  small
+
+  [*] --> classify
+  classify --> decision
+  decision --> big
+  decision --> small
+  big --> [*]
+  small --> [*]

@@ -1,0 +1,14 @@
+stateDiagram-v2
+  split
+  state split_broadcast_fork <<fork>>
+  left
+  right
+  state join <<join>>
+
+  [*] --> split
+  split --> split_broadcast_fork
+  split_broadcast_fork --> left
+  split_broadcast_fork --> right
+  left --> join
+  right --> join
+  join --> [*]
