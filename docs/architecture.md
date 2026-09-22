@@ -1,7 +1,7 @@
 # Swarm Builder — architecture
 
 How the pieces fit. This is the contributor-facing companion to
-[`../README.md`](../README.md) (user-facing) and
+[`guide.md`](./guide.md) (user-facing) and
 [`api.md`](./api.md) (the HTTP contract). [`../PLAN.md`](../PLAN.md) is the
 design record — the probe facts, the rejected alternatives, and the
 reasoning behind every decision here. This file explains the *shape of the
@@ -710,7 +710,7 @@ rule and cancellation. What is new is small:
   `asyncio.create_subprocess_exec` in its own session, relays each line as a
   `node`/`run`/`log` event, and kills the process **group** on timeout or
   cancel. Unlike Phase 5 the environment is passed through unstripped — a run
-  needs credentials — which is the trust-boundary change the README states.
+  needs credentials — which is the trust-boundary change the guide states.
 - `routes/health.py` adds `runReady`/`runBlockers`: every compile blocker plus
   a credential check for the resolved route, so the button is disabled with a
   named reason rather than failing a job.
@@ -762,8 +762,8 @@ procedure as the pydantic-graph target (`langgraph/models.py`), rendered as
 `PLAN.md` describes intent. Where the two disagree, **the code is current and
 this document should follow the code** — the remaining differences (which
 `PLAN.md` mostly records itself, as an "Amendment (implementation)" note or an
-updated assumption) are listed in the README's
-[Where `PLAN.md` and the code still disagree](../README.md#where-planmd-and-the-code-still-disagree)
+updated assumption) are listed in the guide's
+[Where `PLAN.md` and the code still disagree](guide.md#where-planmd-and-the-code-still-disagree)
 table. A few conventions that keep them from drifting:
 
 - **Markers** are spelled by `compile/__init__.py`'s functions, never as

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swarm Builder — Build applications, not PoCs</title>
+  <meta name="description" content="Swarm Builder is a visual agent-workflow builder that compiles your canvas into a validated, runnable Python project on PydanticAI or LangGraph. Describe a workflow in prose, run it on the canvas, export code you own.">
+  <meta property="og:title" content="Swarm Builder — Build applications, not PoCs">
+  <meta property="og:description" content="Visual agent workflows that compile to a validated Python project on open frameworks. No runtime to host, nothing to import back.">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#f4f2ed">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <a class="wordmark" href="#" aria-label="Swarm Builder home">
+    <svg class="mark" width="26" height="26" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+      <path d="M10 16 L21.5 8.5 M10 16 L21.5 23.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity=".6"/>
+      <circle cx="9.5" cy="16" r="4.2" fill="#2b6098"/>
+      <rect x="18.4" y="5" width="7.2" height="7.2" rx="1.6" fill="#8a5a08" transform="rotate(-7 22 8.6)"/>
+      <circle cx="22.2" cy="23.6" r="3.6" fill="#1c6b3a"/>
+    </svg>
+    <span>Swarm Builder</span>
+  </a>
+  <nav aria-label="Primary">
+    <a href="#how">How it works</a>
+    <a href="#example">Example</a>
+    <a href="#export">What you export</a>
+    <a href="#compare">Compared</a>
+    <a href="#quickstart">Quickstart</a>
+    <a class="gh" href="https://github.com/zaterka/swarm-builder">GitHub</a>
+  </nav>
+</header>
+
+<main id="main">
+
+<!-- ============================================================ HERO -->
+<section class="hero">
+  <div class="hero-copy">
+    <h1>Build applications,<br>not&nbsp;PoCs.</h1>
+    <p class="lede">
+      Swarm Builder is a canvas for agent workflows that <strong>compiles to a Python project</strong>
+      on <a href="https://ai.pydantic.dev/graph/">pydantic-graph</a> or
+      <a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph</a>.
+      Every compile is validated before you see it: the project syncs, imports without a key,
+      and runs end to end. What you export is code you own, with pinned dependencies and no
+      runtime to host.
+    </p>
+    <div class="cta-row">
+      <a class="btn primary" href="https://github.com/zaterka/swarm-builder">View on GitHub</a>
+      <a class="btn" href="#quickstart">Run it locally in two commands</a>
+    </div>
+    <p class="fineprint">
+      Local-first. Python 3.11+ and <code>uv</code>. Bring your own model route: OpenAI, Anthropic,
+      DeepSeek, Bedrock, or any OpenAI-compatible endpoint.
+    </p>
+  </div>
+
+  <figure class="artifact" aria-labelledby="artifact-caption">
+    <figcaption id="artifact-caption">
+      <span class="path">src/swarm_workflow/graph.py</span>
+      <span class="note">generated, unedited, from a graph described in one paragraph</span>
+    </figcaption>
+<pre><code>builder = GraphBuilder(
+    name="support-triage",
+    state_type=State,
+    deps_type=Deps,
+    input_type=str,
+    output_type=str,
+)
+
+classifyticket_node = builder.step(classifyticket, node_id="classifyticket")
+billingagent_node = builder.step(billingagent, node_id="billingagent")
+technicalagent_node = builder.step(technicalagent, node_id="technicalagent")
+finalreply_node = builder.step(finalreply, node_id="finalreply")
+
+mergedrafts = builder.join(
+    reduce_list_append, initial_factory=list, node_id="mergedrafts"
+)
+routecategory = builder.decision(node_id="routecategory")
+routecategory = routecategory.branch(
+    builder.match(Literal["billing"]).to(billingagent_node)
+)
+routecategory = routecategory.branch(
+    builder.match(Literal["technical"]).to(technicalagent_node)
+)
+
+builder.add_edge(builder.start_node, classifyticket_node)
+builder.add_edge(classifyticket_node, routecategory)
+builder.add_edge(billingagent_node, mergedrafts)
+builder.add_edge(technicalagent_node, mergedrafts)
+builder.add_edge(mergedrafts, finalreply_node)
+builder.add_edge(finalreply_node, builder.end_node)
+
+graph = builder.build()</code></pre>
+  </figure>
+</section>
+
+<!-- ===================================================== POSITIONING -->
+<section class="claim">
+  <h2>Most visual builders make you a tenant of their runtime.</h2>
+  <p>
+    You draw a flow, and the result is a JSON document only that product can execute. Moving it
+    into a real application means re-implementing it, or shipping the builder alongside your code.
+    Swarm Builder inverts this: the canvas is an <em>editor for a Python project</em>. The graph
+    document is validated against a schema the server owns, the project is emitted from
+    templates, a coding model fills only the marked body regions, and a boundary check proves it
+    touched nothing else. The canvas is where you think; the repository is what you ship.
+  </p>
+</section>
+
+<!-- ===================================================== HOW IT WORKS -->
+<section id="how" class="how">
+  <div class="how-copy">
+    <h2>From a sentence to a running project</h2>
+    <p>
+      Describe the workflow. The model drafts nodes and edges by title; deterministic code derives
+      ids, decision branches, fan-out wiring, state fields and layout, then Phase&nbsp;1 review checks
+      it and feeds any error back for repair. You land on a canvas you can edit, run, and compile.
+    </p>
+    <p>
+      <strong>Run</strong> executes the compiled project with your credentials and traces it node by
+      node on the canvas. Edit a node and run again: a stale project is recompiled first, in the
+      same stream.
+    </p>
+    <p>
+      <strong>Compile</strong> is five phases for PydanticAI, nine when you also want the LangGraph
+      export. Nothing is written to disk until review passes; a failed compile leaves the project
+      in place for inspection.
+    </p>
+  </div>
+
+  <figure class="trace" aria-labelledby="trace-caption">
+    <figcaption id="trace-caption">
+      <span class="path">POST /api/compile · target=langgraph</span>
+      <span class="note">event stream from a real compile, 13 s, DeepSeek</span>
+    </figcaption>
+    <ol class="phases">
+      <li><span class="n">1</span><span class="name">review</span><span class="detail">document schema, cycles, port types, state ownership, route</span></li>
+      <li><span class="n">2</span><span class="name">scaffold</span><span class="detail">pyproject, state, deps, graph.py, step shells, dry run, golden</span></li>
+      <li><span class="n">3</span><span class="name">fill</span><span class="detail">one model call, three tools, marker regions only · <code>filledNodeIds=["classifyticket"]</code></span></li>
+      <li><span class="n">4</span><span class="name">boundary</span><span class="detail">SHA-256 of every forbidden file; outside-marker hash of the rest</span></li>
+      <li><span class="n">5</span><span class="name">validate</span><span class="detail"><code>uv sync</code> · keyless import · <code>TestModel</code> dry run against the golden</span></li>
+      <li><span class="n">6</span><span class="name">lg_scaffold</span><span class="detail">StateGraph wiring, TypedDict state with reducer channels, Runtime context</span></li>
+      <li><span class="n">7</span><span class="name">lg_convert</span><span class="detail">conversion agent translates each validated step body · <code>attempt=1</code></span></li>
+      <li><span class="n">8</span><span class="name">lg_boundary</span><span class="detail">same two-tier check over <code>nodes/</code></span></li>
+      <li><span class="n">9</span><span class="name">lg_validate</span><span class="detail"><code>uv sync</code> · keyless import · fake-model <code>ainvoke</code> vs Mermaid golden</span></li>
+    </ol>
+  </figure>
+</section>
+
+<!-- ===================================================== INTERACTIVE EXAMPLE -->
+<section id="example" class="example">
+  <div class="example-head">
+    <h2>The canvas, with a real graph on it</h2>
+    <p>
+      This is the triage graph from the paragraph below, drawn the way the app draws it. Click a
+      node to see its definition, the step the compile generated for it, and the LangGraph node
+      the conversion produced. <strong>Replay run</strong> animates one real run, with the real
+      outputs. Nothing here calls a model.
+    </p>
+  </div>
+  <div id="demo" class="demo">
+    <div class="demo-toolbar">
+      <span class="demo-input-label">Input</span>
+      <code class="demo-run-input"></code>
+      <button type="button" class="btn demo-replay">Replay run</button>
+      <span class="demo-run-status" aria-live="polite"></span>
+      <span class="demo-scroll-hint">Scroll the canvas sideways to see the whole graph.</span>
+    </div>
+    <div class="demo-body">
+      <div class="demo-canvas"></div>
+      <aside class="demo-inspector" aria-label="Inspector"></aside>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== WHAT YOU EXPORT -->
+<section id="export" class="export">
+  <figure class="tree" aria-labelledby="tree-caption">
+    <figcaption id="tree-caption">
+      <span class="path">workspace/projects/&lt;graphId&gt;/</span>
+      <span class="note">the whole export; nothing else is needed to run it</span>
+    </figcaption>
+<pre><code>pyproject.toml           pinned pydantic-ai-slim[...]==2.43.0, pydantic-graph==2.43.0
+.python-version
+.env.example             the inherited route, never the key
+README.md
+src/swarm_workflow/
+  state.py               @dataclass State from your stateFields
+  deps.py                the model seam: Deps(model=...) resolved from env
+  graph.py               GraphBuilder wiring — generated, never model-written
+  steps/&lt;id&gt;.py          one step per node; the model wrote only the marked body
+  agents/&lt;id&gt;.py         one agent factory per agent node
+validate/
+  dry_run.py             the project's own gate: build, golden, node set, TestModel run
+  golden_render.txt
+run/
+  stream_run.py          per-node tracer the Run button executes</code></pre>
+  </figure>
+
+  <div class="export-copy">
+    <h2>The export is a project, not a file</h2>
+    <dl class="defs">
+      <div>
+        <dt>Built on open frameworks you already know</dt>
+        <dd>The generated code is plain <code>pydantic-graph</code> and PydanticAI, or LangGraph with
+        LangChain used only for the model call. No Swarm Builder import anywhere in the output.
+        Read it, review it, put it under your CI.</dd>
+      </div>
+      <div>
+        <dt>Integrates into any Python application</dt>
+        <dd><code>from swarm_workflow.graph import graph</code>, then <code>await graph.run(...)</code>.
+        It is a package with a <code>pyproject.toml</code>, so it installs like anything else you depend on.</dd>
+      </div>
+      <div>
+        <dt>No dependency on the builder at run time</dt>
+        <dd>Swarm Builder is a developer tool. Delete it after compiling and the project still syncs,
+        imports, and runs. The validation gate proves this with every credential variable stripped.</dd>
+      </div>
+      <div>
+        <dt>Validated before you ever look at it</dt>
+        <dd>A compile that reaches you has passed <code>uv sync</code>, a keyless import, a
+        rendered-diagram golden, a node-set assertion, and a dry run with a test model. A model
+        mistake cannot corrupt graph structure, because the model never writes graph structure.</dd>
+      </div>
+    </dl>
+  </div>
+</section>
+
+<!-- ===================================================== TEXT TO WORKFLOW -->
+<section id="describe" class="describe">
+  <h2>Text to workflow, then edit like an engineer</h2>
+  <div class="describe-grid">
+    <blockquote class="prompt">
+      <p>Take a support ticket as plain text. Classify it as "billing" or "technical" with a
+      rule-based step that returns exactly one of those words and stores the original ticket text
+      in state. Route on the classification: billing tickets go to an agent that explains refund
+      policy; technical tickets go to an agent that suggests a fix. Both agents read the original
+      ticket from state. Finish with an agent that writes a two-sentence customer reply.</p>
+      <footer>the description, verbatim</footer>
+    </blockquote>
+    <div class="result">
+      <table class="nodes">
+        <caption>the graph it produced, first attempt, review-clean</caption>
+        <thead><tr><th scope="col">kind</th><th scope="col">node</th><th scope="col">ports</th><th scope="col">state</th></tr></thead>
+        <tbody>
+          <tr><td>programmatic</td><td>classifyticket</td><td>str → str</td><td>writes <code>ticket_text</code></td></tr>
+          <tr><td>decision</td><td>routecategory</td><td>billing · technical</td><td></td></tr>
+          <tr><td>agent</td><td>billingagent</td><td>str → str</td><td>reads <code>ticket_text</code></td></tr>
+          <tr><td>agent</td><td>technicalagent</td><td>str → str</td><td>reads <code>ticket_text</code></td></tr>
+          <tr><td>join</td><td>mergedrafts</td><td>str → list[str]</td><td>list_append</td></tr>
+          <tr><td>agent</td><td>finalreply</td><td>list[str] → str</td><td>reads <code>ticket_text</code></td></tr>
+        </tbody>
+      </table>
+      <p class="after">
+        The model only names things and connects them. Ids, branch tables, fan-in channels, state
+        defaults and positions are derived, so the result compiles, and the same reviewer that gates
+        a compile gates the draft.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ===================================================== COMPARISON -->
+<section id="compare" class="compare">
+  <h2>Compared with n8n and Langflow</h2>
+  <p class="compare-intro">
+    Both are excellent at what they are for. The difference is what you hold at the end.
+  </p>
+  <div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th scope="col"></th>
+        <th scope="col">Swarm Builder</th>
+        <th scope="col">n8n</th>
+        <th scope="col">Langflow</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <th scope="row">What you export</th>
+        <td>A Python project: <code>pyproject.toml</code>, source, tests, pinned deps</td>
+        <td>Workflow JSON for import into an n8n instance<sup><a href="#fn1">1</a></sup></td>
+        <td>Flow JSON describing components and edges<sup><a href="#fn2">2</a></sup></td>
+      </tr>
+      <tr>
+        <th scope="row">Where it runs</th>
+        <td>Anywhere Python runs; no Swarm Builder at run time</td>
+        <td>An n8n server (self-hosted or cloud)</td>
+        <td>The Langflow server, or its LFX executor with the flow JSON<sup><a href="#fn3">3</a></sup></td>
+      </tr>
+      <tr>
+        <th scope="row">Orchestration framework</th>
+        <td>pydantic-graph / PydanticAI, or LangGraph. Open source, pinned</td>
+        <td>n8n's own engine</td>
+        <td>Langflow components (LangChain-based)</td>
+      </tr>
+      <tr>
+        <th scope="row">Code you can read and change</th>
+        <td>All of it; the model writes only marked regions, verified by hash</td>
+        <td>Code nodes inside the JSON</td>
+        <td>Custom components in Python inside the flow</td>
+      </tr>
+      <tr>
+        <th scope="row">Validation before export</th>
+        <td>Schema review, sync, keyless import, golden diagram, dry run</td>
+        <td>Run the workflow</td>
+        <td>Run the flow</td>
+      </tr>
+      <tr>
+        <th scope="row">Text to workflow</th>
+        <td>Built in; reviewed by the same checks as a compile</td>
+        <td>AI workflow builder (cloud)</td>
+        <td>—</td>
+      </tr>
+      <tr>
+        <th scope="row">Best when</th>
+        <td>The workflow is part of a Python application you maintain</td>
+        <td>Integrating many SaaS APIs with a hosted automation platform</td>
+        <td>Prototyping LangChain flows visually</td>
+      </tr>
+    </tbody>
+  </table>
+  </div>
+  <ol class="footnotes">
+    <li id="fn1">n8n, <a href="https://docs.n8n.io/workflows/export-import/">Export and import workflows</a>: workflows are saved and exchanged as JSON and imported into an n8n instance.</li>
+    <li id="fn2">Langflow, <a href="https://docs.langflow.org/concepts-flows-import">Import and export flows</a>: an exported flow is a JSON file of nodes, edges and metadata.</li>
+    <li id="fn3">Langflow, <a href="https://docs.langflow.org/lfx-overview">About LFX</a>: a lightweight executor that runs flow JSON without the full server. Observed September 2026; both projects evolve quickly. Swarm Builder is not affiliated with either.</li>
+  </ol>
+</section>
+
+<!-- ===================================================== QUICKSTART -->
+<section id="quickstart" class="quickstart">
+  <div class="quick-copy">
+    <h2>Quickstart</h2>
+    <p>
+      The frontend bundle is committed, so the whole install is <code>uv sync</code>. Point
+      <code>UV_CACHE_DIR</code> at a writable directory; the compile gate shells out to
+      <code>uv</code> and inherits it.
+    </p>
+    <p>
+      Model routes come from a DeepSeek Harness <code>settings.yaml</code> if you have one, or from
+      <code>SWARM_MODEL</code>. A <code>.env</code> at the repo root is loaded at startup. To try the
+      pipeline with no credentials at all, set <code>SWARM_FAKE_FILL=1</code>.
+    </p>
+  </div>
+<pre class="shell"><code>git clone https://github.com/zaterka/swarm-builder
+cd swarm-builder
+export UV_CACHE_DIR="$(pwd)/.uv-cache"
+uv sync
+uv run swarm-builder
+<span class="out"># Swarm Builder listening at http://127.0.0.1:8420</span></code></pre>
+</section>
+
+</main>
+
+<footer class="bottom">
+  <p><a href="https://github.com/zaterka/swarm-builder">github.com/zaterka/swarm-builder</a> · <a href="https://github.com/zaterka/swarm-builder/blob/main/docs/architecture.md">Architecture</a> · <a href="https://github.com/zaterka/swarm-builder/blob/main/docs/api.md">HTTP API</a></p>
+  <p>Builds on <a href="https://ai.pydantic.dev/">PydanticAI</a>, <a href="https://ai.pydantic.dev/graph/">pydantic-graph</a> and <a href="https://docs.langchain.com/oss/python/langgraph/overview">LangGraph</a>. n8n and Langflow are trademarks of their respective owners.</p>
+</footer>
+<script src="demo-data.js" defer></script>
+<script src="demo.js" defer></script>
+</body>
+</html>

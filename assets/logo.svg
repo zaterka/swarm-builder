@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="72" viewBox="0 0 360 72" role="img" aria-label="Swarm Builder">
+  <g transform="translate(8 8) scale(1.75)">
+    <path d="M10 16 L21.5 8.5 M10 16 L21.5 23.5" stroke="#24262a" stroke-width="1.8" stroke-linecap="round" opacity=".6"/>
+    <circle cx="9.5" cy="16" r="4.2" fill="#2b6098"/>
+    <rect x="18.4" y="5" width="7.2" height="7.2" rx="1.6" fill="#8a5a08" transform="rotate(-7 22 8.6)"/>
+    <circle cx="22.2" cy="23.6" r="3.6" fill="#1c6b3a"/>
+  </g>
+  <text x="72" y="47" font-family="Iowan Old Style, Palatino Linotype, Book Antiqua, Palatino, Georgia, serif" font-size="34" font-weight="500" fill="#24262a" letter-spacing="-0.3">Swarm Builder</text>
+</svg>

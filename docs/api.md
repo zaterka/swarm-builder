@@ -9,7 +9,7 @@ the SSE framing and reconnect contract in particular is specified down to
 the byte. For the *why* behind these shapes see
 [`../PLAN.md`](../PLAN.md); for how the pieces fit together see
 [`architecture.md`](./architecture.md); for getting the server running see
-[`../README.md`](../README.md).
+[`guide.md`](./guide.md).
 
 - [Conventions](#conventions)
 - [GET /api/health](#get-apihealth)
