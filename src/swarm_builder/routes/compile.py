@@ -16,6 +16,11 @@ implemented and tested:
   (no ``Last-Event-ID`` at all) uses.
 * ``DELETE /api/compile/{compile_id}`` cancels.
 
+The three job endpoints are also mounted under ``/api/jobs/{id}`` (hidden
+from the OpenAPI document as duplicates): a *run* job (``routes/runs.py``,
+``kind="run"``) lives in the same registry and is streamed, snapshotted
+and cancelled through exactly the same handlers.
+
 **The registry is the one deliberate exception to this package's no-
 caching rule** (``routes/__init__.py``'s module docstring). Env vars and
 ``settings.yaml`` are hot-reloadable and must be re-read per request; a
@@ -53,7 +58,7 @@ from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEv
 from swarm_builder.config import get_dsh_home, get_workspace_dir
 from swarm_builder.models import SwarmGraph
 from swarm_builder.routes.graphs import _load_graph_or_http_error
-from swarm_builder.store.projects import project_dir
+from swarm_builder.store.projects import langgraph_project_dir, project_dir
 
 if TYPE_CHECKING:
     # Annotations only. The runtime import of the compile subsystem is
@@ -195,9 +200,16 @@ class _CamelModel(BaseModel):
 
 
 class StartCompileRequest(_CamelModel):
-    """Body of ``POST /api/compile``."""
+    """Body of ``POST /api/compile``.
+
+    ``target`` selects the export: ``pydantic-graph`` (default, the five
+    phases) or ``langgraph`` (the five phases, then a conversion of the
+    validated project into a LangGraph export under
+    ``workspace/projects-langgraph/<graphId>/``).
+    """
 
     graph_id: str
+    target: Literal["pydantic-graph", "langgraph"] = "pydantic-graph"
 
 
 class StartCompileResponse(_CamelModel):
@@ -221,6 +233,7 @@ class CompileSnapshotResponse(_CamelModel):
 
     compile_id: str
     graph_id: str
+    kind: Literal["compile", "run"] = "compile"
     status: Literal["queued", "running", "succeeded", "failed", "cancelled"]
     created_at: str
     started_at: str | None
@@ -584,7 +597,13 @@ async def start_compile(body: StartCompileRequest) -> StartCompileResponse:
         ) from exc
 
     job.task = asyncio.create_task(
-        _run_job(graph, registry=registry, compile_id=compile_id, workspace_dir=workspace_dir)
+        _run_job(
+            graph,
+            registry=registry,
+            compile_id=compile_id,
+            workspace_dir=workspace_dir,
+            target=body.target,
+        )
     )
     return StartCompileResponse(compile_id=compile_id)
 
@@ -656,7 +675,12 @@ def _load_filler() -> Callable[..., Awaitable[object]]:
 
 
 async def _run_job(
-    graph: SwarmGraph, *, registry: JobRegistry, compile_id: str, workspace_dir: Path
+    graph: SwarmGraph,
+    *,
+    registry: JobRegistry,
+    compile_id: str,
+    workspace_dir: Path,
+    target: str = "pydantic-graph",
 ) -> None:
     """Drive one compile to completion as its job's own asyncio task.
 
@@ -698,9 +722,16 @@ async def _run_job(
         project_dir=project_dir(workspace_dir, graph.id),
         dsh_home=get_dsh_home(),
         filler=filler,
+        target=target,
+        langgraph_project_dir=langgraph_project_dir(workspace_dir, graph.id),
     )
 
 
+@router.get(
+    "/jobs/{compile_id}/events",
+    response_model=None,
+    include_in_schema=False,
+)
 @router.get(
     "/compile/{compile_id}/events",
     response_model=None,
@@ -775,6 +806,7 @@ async def _replay_frames(
         yield frame
 
 
+@router.get("/jobs/{compile_id}", response_model=CompileSnapshotResponse, include_in_schema=False)
 @router.get(
     "/compile/{compile_id}",
     response_model=CompileSnapshotResponse,
@@ -798,6 +830,9 @@ def compile_status(compile_id: str) -> CompileSnapshotResponse:
     return _snapshot_response(_job_or_http_error(compile_id))
 
 
+@router.delete(
+    "/jobs/{compile_id}", response_model=CompileSnapshotResponse, include_in_schema=False
+)
 @router.delete(
     "/compile/{compile_id}",
     response_model=CompileSnapshotResponse,

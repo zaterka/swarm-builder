@@ -30,3 +30,6 @@ dist/
 
 # Runtime data: saved graphs and generated projects
 workspace/
+
+# Local environment (API keys); loaded by `swarm-builder` and docker compose
+.env

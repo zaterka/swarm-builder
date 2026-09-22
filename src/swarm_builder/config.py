@@ -104,3 +104,51 @@ def get_swarm_api_key_env() -> str | None:
     """Name of the environment variable holding the API key for a
     ``SWARM_BASE_URL`` route (never the key value itself)."""
     return os.environ.get("SWARM_API_KEY_ENV") or None
+
+
+#: Where :func:`load_env_file` looks by default: a ``.env`` next to
+#: ``pyproject.toml``, the same file ``docker-compose.yml`` reads.
+DEFAULT_ENV_FILE: Path = REPO_ROOT / ".env"
+
+
+def load_env_file(path: Path = DEFAULT_ENV_FILE) -> list[str]:
+    """Load ``KEY=VALUE`` lines from ``path`` into the process environment.
+
+    Only variables that are *not already set* are loaded, so a value
+    exported in the shell always wins over the file. Blank lines and
+    ``#`` comments are skipped; an optional ``export `` prefix and
+    surrounding single or double quotes on the value are stripped. A
+    missing file is a normal state and loads nothing.
+
+    Called once by the console script (``main.run``) before the server
+    starts. Deliberately not called by ``create_app()``, so tests and
+    embedding callers see exactly the environment they construct.
+
+    Args:
+        path: The env file to read.
+
+    Returns:
+        The names that were loaded, in file order.
+    """
+    if not path.is_file():
+        return []
+    loaded: list[str] = []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        name, _, value = line.partition("=")
+        name = name.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if not name or name in os.environ:
+            continue
+        if not value:
+            # `KEY=` in .env.example means "unset"; keep it that way.
+            continue
+        os.environ[name] = value
+        loaded.append(name)
+    return loaded

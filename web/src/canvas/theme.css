@@ -3,24 +3,30 @@
    typed and validated rather than free-form"). No visual state here is
    ever persisted in the graph document -- every rule below is purely
    presentational, keyed off stable inputs (a node's own id) so the
-   jitter doesn't re-randomize on every re-render. */
+   jitter doesn't re-randomize on every re-render.
+
+   The hand font is scoped to node titles and edge labels; badges,
+   previews and the React Flow controls use the UI font, which keeps the
+   sketch character where it carries meaning and keeps small text
+   legible. */
 
 :root {
-  --sb-ink: #2b2b2b;
+  --sb-ink: #33312c;
   --sb-paper: #fffdf7;
-  --sb-agent: #3b6ea5;
-  --sb-programmatic: #6a7f3b;
-  --sb-decision: #a5673b;
-  --sb-join: #7a4f9e;
-  --sb-delegate: #8a8a8a;
-  --sb-font-hand: 'Comic Sans MS', 'Segoe Print', cursive, sans-serif;
+  --sb-agent: #35618f;
+  --sb-programmatic: #5f7436;
+  --sb-decision: #9c5f33;
+  --sb-join: #6f4894;
+  --sb-delegate: #8d887e;
+  --sb-font-hand: 'Bradley Hand', 'Chalkboard SE', 'Segoe Print', 'Comic Sans MS', cursive;
 }
 
+/* Paper colour only. The dot grid belongs to React Flow's <Background>,
+   which lives inside the transformed viewport and therefore pans and
+   zooms with the nodes; a CSS pattern here would be painted in screen
+   space and slide under the graph as you drag. */
 .sb-canvas-pane {
   background-color: var(--sb-paper);
-  background-image: radial-gradient(circle, #cfcabf 1px, transparent 1.4px);
-  background-size: 18px 18px;
-  font-family: var(--sb-font-hand);
 }
 
 /* The rotation jitter goes on this INNER wrapper only, never on
@@ -32,10 +38,20 @@
   transform: rotate(var(--sb-jitter, 0deg));
   border: 2px solid var(--sb-ink);
   background: var(--sb-paper);
-  padding: 8px 10px;
-  min-width: 160px;
-  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.15);
-  font-family: var(--sb-font-hand);
+  padding: 9px 11px 10px;
+  min-width: 168px;
+  box-shadow: 2px 3px 0 rgba(51, 49, 44, 0.1);
+  transition: box-shadow 130ms ease;
+}
+
+.sb-node-sketch:hover {
+  box-shadow: 3px 4px 0 rgba(51, 49, 44, 0.16);
+}
+
+/* Selection ring is drawn here rather than on the React Flow node so it
+   follows the jittered rotation of the card it belongs to. */
+.react-flow__node.selected .sb-node-sketch {
+  box-shadow: 0 0 0 3px rgba(43, 96, 152, 0.28), 2px 3px 0 rgba(51, 49, 44, 0.12);
 }
 
 .sb-node-sketch.sb-kind-agent {
@@ -60,13 +76,13 @@
 
 .sb-node-badge {
   display: inline-block;
-  font-size: 10px;
-  font-weight: bold;
-  letter-spacing: 0.05em;
-  padding: 1px 5px;
-  border-radius: 6px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  padding: 2px 6px;
+  border-radius: 5px;
   color: white;
-  margin-bottom: 4px;
+  margin-bottom: 5px;
 }
 .sb-kind-agent .sb-node-badge { background: var(--sb-agent); }
 .sb-kind-programmatic .sb-node-badge { background: var(--sb-programmatic); }
@@ -75,28 +91,48 @@
 
 .sb-node-corner-tag {
   position: absolute;
-  top: -10px;
-  left: -6px;
+  top: -9px;
+  left: -5px;
   font-size: 9px;
-  font-weight: bold;
+  font-weight: 600;
+  letter-spacing: 0.06em;
   background: var(--sb-ink);
   color: white;
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: 4px;
+  box-shadow: 0 1px 2px rgba(51, 49, 44, 0.2);
 }
 
 .sb-node-title {
-  font-weight: bold;
-  font-size: 13px;
+  font-family: var(--sb-font-hand);
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 1.3;
   color: var(--sb-ink);
 }
 .sb-node-intent-preview {
+  margin-top: 2px;
   font-size: 11px;
-  color: #555;
+  line-height: 1.4;
+  color: #6f6a60;
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Handles read as pen-drawn ports rather than default blue dots, and
+   grow on hover so they stay easy to grab at the same hit area. */
+.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  background: var(--sb-paper);
+  border: 2px solid var(--sb-ink);
+  transition: transform 120ms ease, background 120ms ease;
+}
+.react-flow__handle:hover {
+  background: var(--sb-agent);
+  transform: scale(1.35);
 }
 
 /* Edge styling per kind -- seq solid, branch solid+labeled, fanout/join
@@ -114,9 +150,114 @@
 
 .sb-edge-label {
   font-family: var(--sb-font-hand);
-  font-size: 11px;
+  font-size: 11.5px;
+  color: var(--sb-ink);
   background: var(--sb-paper);
-  padding: 1px 4px;
-  border: 1px solid var(--sb-ink);
-  border-radius: 4px;
+  padding: 1px 6px;
+  border: 1px solid rgba(51, 49, 44, 0.45);
+  border-radius: 5px;
+  box-shadow: 0 1px 2px rgba(51, 49, 44, 0.12);
+}
+
+/* React Flow's own chrome, matched to the app's surfaces. */
+.react-flow__controls {
+  border-radius: 9px;
+  overflow: hidden;
+  border: 1px solid #e0dbd1;
+  box-shadow: 0 1px 2px rgba(35, 30, 22, 0.06), 0 8px 20px -12px rgba(35, 30, 22, 0.28);
+}
+.react-flow__controls-button {
+  width: 27px;
+  height: 27px;
+  min-height: 0;
+  padding: 0;
+  background: #fff;
+  border: none;
+  border-bottom: 1px solid #ece8e0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.react-flow__controls-button:last-child {
+  border-bottom: none;
+}
+.react-flow__controls-button:hover:not(:disabled) {
+  background: #f4f2ed;
+}
+.react-flow__controls-button svg {
+  fill: #5c626c;
+}
+
+.react-flow__minimap {
+  border-radius: 9px;
+  border: 1px solid #e0dbd1;
+  box-shadow: 0 1px 2px rgba(35, 30, 22, 0.06), 0 8px 20px -12px rgba(35, 30, 22, 0.28);
+  background: rgba(255, 255, 255, 0.92);
+}
+.react-flow__minimap-mask {
+  fill: rgba(51, 49, 44, 0.07);
+}
+.react-flow__minimap-node {
+  fill: #c9c3b5;
+  stroke: none;
+}
+
+/* The connection-kind popover that Canvas renders over the pane. */
+.sb-edge-popover {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 10;
+  width: 268px;
+  padding: 13px 14px 14px;
+  background: var(--sb-surface, #fff);
+  border: 1px solid #e4e0d8;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(35, 30, 22, 0.05), 0 16px 32px -14px rgba(35, 30, 22, 0.3);
+}
+.sb-edge-popover-title {
+  margin-bottom: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.sb-edge-popover-note {
+  margin-bottom: 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #5c626c;
+}
+.sb-edge-popover label {
+  margin-bottom: 2px;
+}
+.sb-edge-popover-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.sb-edge-popover-actions button {
+  flex: 1 1 auto;
+}
+
+
+/* ---------- Run status ring (data-run-status, from state/runState.ts) ---------- */
+
+.sb-node-sketch[data-run-status='running'] {
+  box-shadow: 0 0 0 3px rgba(43, 96, 152, 0.35), 2px 3px 0 rgba(51, 49, 44, 0.12);
+  animation: sb-run-pulse 1.1s ease-in-out infinite;
+}
+.sb-node-sketch[data-run-status='succeeded'] {
+  box-shadow: 0 0 0 3px rgba(28, 107, 58, 0.35), 2px 3px 0 rgba(51, 49, 44, 0.12);
+}
+.sb-node-sketch[data-run-status='failed'] {
+  box-shadow: 0 0 0 3px rgba(165, 42, 47, 0.45), 2px 3px 0 rgba(51, 49, 44, 0.12);
+}
+@keyframes sb-run-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px rgba(43, 96, 152, 0.35), 2px 3px 0 rgba(51, 49, 44, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(43, 96, 152, 0.12), 2px 3px 0 rgba(51, 49, 44, 0.12);
+  }
 }

@@ -326,6 +326,10 @@ review here therefore does not promise a warning-free compile.
 
 ## GET /api/graphs/:id/export
 
+Optional `?target=pydantic-graph|langgraph` (default `pydantic-graph`) selects
+which export to report; the response carries `target` back. A `404` names the
+directory the requested target would have been written to.
+
 Hands back the generated project's location and the exact command that runs
 it. This route checks for a **project directory**, not a graph document:
 `projectExists` is validated against `graph_id` as a path segment, so an
@@ -357,8 +361,17 @@ subprocess and no watcher, so there is nothing to reap and nothing to leak.
 ### POST /api/compile
 
 ```json
-{ "graphId": "linear-chat" }
+{ "graphId": "linear-chat", "target": "pydantic-graph" }
 ```
+
+`target` is optional: `pydantic-graph` (default) runs the five phases;
+`langgraph` runs them and then four more (`lg_scaffold`, `lg_convert`,
+`lg_boundary`, `lg_validate`) that convert the validated project into a
+LangGraph export under `workspace/projects-langgraph/<graphId>/`. Every
+`phase` frame of a LangGraph compile reports `total: 9` and indices 6-9 for
+the extra phases; the `done` payload gains a `langgraph` block:
+`{projectPath, runCommand, diagram, convertedNodeIds, attempts}` (the diagram
+is `draw_mermaid()` output). An unknown target is a `422`.
 
 Returns as soon as the job is registered and its task is scheduled; it never
 awaits the compile.
@@ -496,6 +509,100 @@ partially scaffolded or partially filled project is left on disk.
 
 The SSE stream. See the next section.
 
+## Run endpoints
+
+A run executes an already-compiled project in a subprocess with the server's
+real credentials and streams one event per step. It is a job of kind `run`
+in the **same registry** as a compile, so its live stream, status snapshot and
+cancel are the generic job endpoints below; only starting a run and its
+persisted history are run-specific. A live compile and a live run on the same
+graph exclude each other (`409`), because both touch the project directory.
+
+### POST /api/graphs/:id/runs
+
+```json
+{ "input": "swarm builder", "compileIfStale": true }
+```
+
+`input` is interpreted by the entry node's `inputType`: a `str` port takes the
+string verbatim; `json` and `list[str]` take either the parsed value or a JSON
+string of it. `compileIfStale` (default `true`) recompiles first when the
+project is missing, predates the tracer script, or its `graph.py` is older
+than the graph's `updatedAt`; the compile's `phase` frames then stream into
+the run's own job. With `compileIfStale: false` a stale project is a `409`.
+
+```json
+{ "runId": "2f7770d13af6461dbe417ab5dbd7a289", "willCompile": true }
+```
+
+| Status | When |
+|---|---|
+| `202` | Job registered and scheduled. |
+| `404` | No such saved graph. |
+| `409` | A live compile or run already exists for this graph, or the project is stale and `compileIfStale` is off. |
+| `422` | The input does not fit the entry node's port type (the detail says which). |
+| `503` | The run subsystem could not be imported. |
+
+### GET /api/jobs/:id/events, GET /api/jobs/:id, DELETE /api/jobs/:id
+
+The compile job endpoints under a kind-neutral path: identical framing,
+`Last-Event-ID` replay, snapshot shape (now with `kind: "compile" | "run"`)
+and cancel semantics. A cancelled run kills the subprocess **group** (`uv`
+plus the interpreter it forked) before the job ends `cancelled`.
+
+### GET /api/graphs/:id/runs and GET /api/graphs/:id/runs/:runId
+
+Persisted run records, newest first, at most 20 per graph
+(`workspace/runs/<graphId>/<runId>.json`). A record carries `status`, the
+`input`, the final `output` and `state`, `model`, `durationMs`, `compiled`
+(whether a compile preceded the run), `error`, and `nodes`: per step, the
+last reported `status`, `inputs`, `output`, `stateDelta`, `error`,
+`durationMs`. Written when the run starts and rewritten when it ends, so
+history survives a server restart.
+
+### Run frames on the event stream
+
+Two frame types beyond the compile's five:
+
+| `event` | Payload |
+|---|---|
+| `run` | `{status: "compiling" \| "starting" \| "started", model?, input?, compiled?}` — where the job is. `compiling` precedes a compile-if-stale; `started` carries the model the project resolved and the coerced input. |
+| `node` | `{nodeId, status: "started" \| "succeeded" \| "failed", inputs?, output?, stateDelta?, error?, traceback?, durationMs?}` — one `started` and one terminal frame per step (`agent`/`programmatic`). Decision and join nodes are builder constructs with no step function and are not traced; the canvas derives their state from their neighbours. Values longer than 4000 characters arrive as `{"__preview__": "...", "__truncated__": true}`. |
+
+A run's terminal `done` payload is `{output, state, durationMs, model,
+compiled, finishedAt}` (also the snapshot `result`), and its `error` payload
+is `{code: "run_failed", message, exception}`. Stderr from the subprocess
+arrives as `log` frames with `stream: "stderr"`.
+
+## POST /api/graphs/generate
+
+Describe a workflow in prose; get a saved, review-clean graph back.
+
+```json
+{ "description": "Take a support ticket. Classify it as billing or technical. ...", "name": "Triage", "graphId": null, "modelOverride": null }
+```
+
+The model emits a relaxed draft (nodes by title, edges by title, no ids or
+positions); the server derives ids with the same slugifier the canvas uses,
+builds decision branches and fan-out/join wiring, lays the nodes out
+left-to-right, and runs Phase 1's `review`. Errors are fed back to the model
+for up to two repair rounds. `graphId` reuses an existing id (replacing that
+document); omitted, a new UUID is minted. The result is saved through the
+graph store before it is returned.
+
+```json
+{ "graph": { "...": "a SwarmGraph" }, "warnings": [], "attempts": 1, "model": { "provider": "...", "model": "...", "source": "settings-default" } }
+```
+
+| Status | When |
+|---|---|
+| `200` | Saved and returned. `warnings` are the reviewer's non-blocking findings. |
+| `422` | Empty/oversized description, or every attempt failed — the detail is `{message, problems, attempts}` with the last round's review findings. |
+| `503` | No model route configured (bundle default), an unmappable route, or the generator could not be imported. |
+
+`SWARM_FAKE_GENERATE=1` replaces the model with a deterministic
+sentence-per-step draft so the endpoint works with no credentials.
+
 ## The route-resolution warning: `unknown_model_name`
 
 The fourth finding code a compile can report, alongside the three review
@@ -612,7 +719,7 @@ data: {"code":"unknown_model_name","message":"the inherited default 'deepseek:de
 
 `phase` events carry `name` (one of `review`, `scaffold`, `fill`,
 `boundary`, `validate`), `index` (the phase's 1-based position, so a client
-never hardcodes an ordering), `total` (always 5), and `status`:
+never hardcodes an ordering), `total` (5, or 9 for a `target: "langgraph"` compile), and `status`:
 
 - `started` — each phase emits exactly one.
 - `succeeded` — with phase-specific extras: `review` adds `errorCount`,

@@ -53,6 +53,7 @@ describe('S1: a status snapshot rebuilds only what it really carries', () => {
       'error',
       'finishedAt',
       'graphId',
+      'kind',
       'latestEventId',
       'result',
       'startedAt',
@@ -118,6 +119,7 @@ describe('S1: a status snapshot rebuilds only what it really carries', () => {
       filledNodeIds: ['intake', 'summarize'],
       attempts: 1,
       model: { provider: 'deepseek-official', model: 'deepseek-flash', source: 'settings-default' },
+      langgraph: null,
     });
     // `diagram` is the wire name; `renderedDiagram` never existed.
     expect(next.result && 'renderedDiagram' in next.result).toBe(false);

@@ -3,12 +3,13 @@ import { jitterDegForId } from '../jitter';
 import type { SwarmNodeData } from './AgentNode';
 
 export function JoinNode({ id, data }: NodeProps & { data: SwarmNodeData }) {
-  const { node, isEntry, isExit } = data;
+  const { node, isEntry, isExit, runStatus } = data;
   return (
     <div
       className="sb-node-sketch sb-kind-join"
       style={{ '--sb-jitter': `${jitterDegForId(id)}deg` } as React.CSSProperties}
       data-testid={`node-${id}`}
+      data-run-status={runStatus ?? 'idle'}
       data-node-kind="join"
     >
       {isEntry && <span className="sb-node-corner-tag">START</span>}

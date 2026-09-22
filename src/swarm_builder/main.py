@@ -28,9 +28,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from swarm_builder import __version__
-from swarm_builder.config import REPO_ROOT, get_host, get_port
+from swarm_builder.config import REPO_ROOT, get_host, get_port, load_env_file
 from swarm_builder.routes import compile as compile_routes
-from swarm_builder.routes import export, graphs, health, llm_routes, templates
+from swarm_builder.routes import export, generate, graphs, health, llm_routes, runs, templates
 
 
 @asynccontextmanager
@@ -82,6 +82,8 @@ def create_app() -> FastAPI:
     app.include_router(llm_routes.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
     app.include_router(compile_routes.router, prefix="/api")
+    app.include_router(runs.router, prefix="/api")
+    app.include_router(generate.router, prefix="/api")
 
     web_dist = REPO_ROOT / "web" / "dist"
     if (web_dist / "index.html").exists():
@@ -120,10 +122,17 @@ def run() -> None:
     in use) after printing a message naming ``PORT`` as the fix --
     deliberately no auto-increment fallback.
 
+    Loads a repo-root ``.env`` first (shell values win; see
+    :func:`swarm_builder.config.load_env_file`), so an API key placed there
+    reaches the fill agent, the generator and every run subprocess.
+
     Binds ``SWARM_HOST``, which defaults to loopback and is set to
     ``0.0.0.0`` only by the container image, where a loopback bind would
     be unreachable through a published port.
     """
+    loaded = load_env_file()
+    if loaded:
+        print(f"Loaded {len(loaded)} variable(s) from .env: {', '.join(loaded)}")
     host = get_host()
     port = get_port()
     print(f"Swarm Builder listening at http://{host}:{port}")

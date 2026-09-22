@@ -1035,7 +1035,7 @@ async def test_scripted_fill_passes_phase_four_and_phase_five(tmp_path: Path) ->
             "\n"
             "\n"
             "def _resolve_default_model() -> str:\n"
-            '    return os.environ.get("SWARM_MODEL", DEFAULT_MODEL)\n'
+            '    return os.environ.get("SWARM_MODEL") or DEFAULT_MODEL\n'
         ),
         pyproject_extras=("bedrock",),
         readme_model_note="Inherited default model: bedrock:us.anthropic.claude-opus-5.",

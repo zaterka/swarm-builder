@@ -67,6 +67,20 @@ export type CompileJobStatus = CompileSnapshot['status'];
 export type StartCompileRequest = components['schemas']['StartCompileRequest'];
 export type StartCompileResponse = components['schemas']['StartCompileResponse'];
 
+// Runs (`routes/runs.py`). A run's live stream/snapshot/cancel reuse the
+// compile job endpoints (`/api/jobs/:id...`), so `CompileSnapshot` is also a
+// run job's snapshot; only starting a run and its persisted history have
+// their own shapes.
+export type StartRunRequest = components['schemas']['StartRunRequest'];
+export type StartRunResponse = components['schemas']['StartRunResponse'];
+export type RunRecord = components['schemas']['RunRecord'];
+export type NodeRunRecord = components['schemas']['NodeRunRecord'];
+export type RunListResponse = components['schemas']['RunListResponse'];
+
+// Describe -> generate (`routes/generate.py`).
+export type GenerateGraphRequest = components['schemas']['GenerateGraphRequest'];
+export type GenerateGraphResponse = components['schemas']['GenerateGraphResponse'];
+
 export const PORT_TYPES: readonly PortType[] = ['str', 'json', 'list[str]'];
 export const REDUCER_IDS: readonly ReducerId[] = [
   'list_append',

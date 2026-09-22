@@ -16,9 +16,10 @@ depend on `dsh`, and it works fully with the harness absent.
 | Document | What it covers |
 |---|---|
 | **this file** | quickstart, model configuration, the five compile phases, the guarantees the compile relies on, troubleshooting |
-| [`docs/api.md`](docs/api.md) | the HTTP API and the SSE stream contract |
+| [`docs/api.md`](docs/api.md) | the HTTP API and the SSE stream contract, including the run and generate endpoints |
 | [`docs/architecture.md`](docs/architecture.md) | how the pieces fit, and why |
 | [`PLAN.md`](PLAN.md) | the design record: probe facts, rejected alternatives, acceptance criteria |
+| [`PLAN-V2-FEATURES.md`](PLAN-V2-FEATURES.md) | the plan and status for Run-from-UI, Describe → generate, and the LangGraph export target |
 
 ---
 
@@ -296,6 +297,13 @@ export SWARM_API_KEY_ENV="KORNERSTONE_API_KEY"
 export KORNERSTONE_API_KEY="sk-..."
 ```
 
+These can also live in a `.env` file at the repository root: `uv run
+swarm-builder` loads it at startup (a value already exported in the shell
+wins; empty `KEY=` lines are ignored). That is the same file `docker compose`
+reads, so one `.env` serves both. Provider keys such as `DEEPSEEK_API_KEY` or
+`OPENAI_API_KEY` belong there too — the fill agent, **Describe → generate**
+and every **Run** subprocess read them from the server's environment.
+
 `SWARM_MODEL` is only consulted when no `agent-default-model` is inherited, so
 the precedence is: **graph override → `agent-default-model` →
 `SWARM_MODEL` → bundle default** (`deepseek-official` / `deepseek-v4-flash`,
@@ -400,6 +408,101 @@ specified precisely in [`docs/api.md`](docs/api.md#sse-event-stream).
 
 ---
 
+## Run a workflow from the UI
+
+The compile drawer has a second tab, **Run**. Type an input for the entry node
+(a plain string, or JSON for a `json`/`list[str]` port), press **Run**, and
+watch the canvas: the active node pulses, finished nodes turn green, a failed
+node turns red. The panel shows the step trace with per-step timings, the
+final output, the final `State`, and the last 20 runs for this graph; the
+Inspector shows a selected node's last inputs and output under **Last run**.
+
+**Run compiles first when it has to.** If the graph has never been compiled,
+or has been edited since, the run streams the five compile phases and then
+executes — one button, no separate step to remember. A project compiled
+before this feature existed is also treated as stale (it has no tracer).
+
+**What actually runs.** The generated project's own `run/stream_run.py`,
+under `uv run`, in the project directory, with the environment the server was
+started with. That is the same subprocess boundary Phase 5's dry run already
+crosses, with one deliberate difference: **credentials are passed through**,
+because a run that cannot reach a model would be pointless. Generated step
+bodies are model-written code, so a run executes model-written code on your
+machine with your keys. The bounds are a 15-minute wall-clock timeout, a
+process-group kill on cancel or timeout, no shell (the input travels in a
+file), and the health check: `GET /api/health` now reports `runReady` and
+`runBlockers`, and the button is disabled until the resolved route's
+credential is present in the server's environment. Nothing sandboxes the
+subprocess's filesystem or network beyond that.
+
+A run is a job in the same registry as a compile — same `Last-Event-ID`
+resume after a reload, same cancel, and one live job per graph. History is
+written to `workspace/runs/<graphId>/`. See
+[`docs/api.md`](docs/api.md#run-endpoints) for the endpoints and frames.
+
+To exercise the run plumbing with no credentials at all, start the server
+with `SWARM_FAKE_FILL=1 SWARM_RUN_TEST_MODEL=1`: the compile stubs the fill
+and the run injects a keyless `TestModel`, so every step still reports.
+
+## Generate a graph from a description
+
+On the start screen, **Describe a workflow** takes a paragraph of prose and
+returns a whole graph: nodes, edges, state fields, laid out left to right,
+already saved, and already clean under the same review the compile runs. In
+the workspace, **Describe…** in the toolbar does the same for the current
+graph after a confirmation, replacing the canvas.
+
+The model only drafts titles, kinds, intents, and edges between titles.
+Everything the document's invariants depend on is derived by the server:
+node ids come from the same slugifier the canvas uses, decision branches from
+the branch edges, fan-out/join wiring from the shape, positions from a
+layered layout. The reviewer's errors are fed back to the model for up to two
+repair rounds; if it still cannot produce a clean graph, the panel shows the
+remaining findings instead of an unusable canvas. Expect to edit the result —
+that is what the Inspector is for — but expect it to compile.
+
+Generation needs a configured model route (the same one a compile uses). With
+`SWARM_FAKE_GENERATE=1` the model is replaced by a deterministic
+sentence-per-step draft, which is how the endpoint and the panel are tested.
+
+## Export to LangGraph
+
+The compile panel has a **Target** picker. *PydanticAI + LangGraph export*
+runs the usual five phases, then four more that turn the **validated**
+PydanticAI project into a LangGraph project under
+`workspace/projects-langgraph/<graphId>/`:
+
+| # | Phase | What it does |
+|---|---|---|
+| 6 | `lg_scaffold` | Deterministic. Emits `pyproject.toml` (pinned `langgraph` 1.2.12, `langchain` 1.4.2, `langchain-core` 1.6.4, plus the LangChain partner package for the inherited route), `state.py` (a `TypedDict` with a `payload` channel, the canvas state fields, and one reducer channel per join), `context.py` (a `Runtime` context carrying the LangChain chat model), `graph.py` (the `StateGraph` wiring), one `nodes/<id>.py` per canvas node, and `validate/dry_run.py` with a Mermaid golden. |
+| 7 | `lg_convert` | The one model call. A conversion agent reads each filled `steps/<id>.py` of the PydanticAI project and writes the equivalent body into the marker region of `nodes/<id>.py`. Only `programmatic` bodies need converting: agent, decision and join nodes are complete templates. Retried once if 8 or 9 fails. |
+| 8 | `lg_boundary` | The same two-tier boundary check as Phase 4, over `nodes/`. |
+| 9 | `lg_validate` | `uv sync`, keyless import, and the project's own dry run: Mermaid golden, node set, and a full `ainvoke` against a keyless fake chat model. |
+
+**What the export looks like.** Orchestration is pure LangGraph:
+`StateGraph`, `START`/`END`, `add_conditional_edges` for decisions
+(a decision is a pass-through node whose routing function maps the previous
+step's return value to a branch, exactly as pydantic-graph dispatches),
+one `add_edge` per fan-out arm and `add_edge([arms], join)` for fan-in, with
+arms writing into the join's reducer channel. LangChain appears only where a
+model is called: `init_chat_model` (or `ChatOpenAI` for a custom base URL),
+`langchain.messages`, and `@tool` for orchestrator delegation. No
+`create_agent`, no `create_react_agent`, no LCEL. Each node module has the
+editable body function `async def <id>_body(inputs, state, model, writes)`
+and a generated wrapper that builds the state update. In both targets an agent node that declares `reads`
+receives those state fields as context lines under its input, so a declared
+read is never decorative.
+
+Supported routes: OpenAI, Anthropic, DeepSeek, Bedrock (`bedrock_converse`),
+and any OpenAI-compatible base URL. Another provider fails `lg_scaffold` with
+a clear message. A `websearch` agent node is emitted as a plain chat call with
+a comment where to bind a search tool.
+
+`GET /api/graphs/:id/export?target=langgraph` reports the export's path and
+run command. **Run** always executes the PydanticAI project. Under
+`SWARM_FAKE_FILL=1` the conversion is a deterministic stub, so the whole
+nine-phase compile works with no credentials.
+
 ## Running the tests
 
 ```bash
@@ -468,10 +571,12 @@ workspace/projects/<graphId>/
   validate/
     dry_run.py              the project's own TestModel-injected gate
     golden_render.txt       the expected graph.render() output, captured at scaffold time
+  run/
+    stream_run.py           the tracer the UI's Run button executes: one JSON line per step
 ```
 
 `graph.py`, `state.py`, `deps.py`, `pyproject.toml` and everything under
-`validate/` are regenerated on every recompile and are never model-written.
+`validate/` and `run/` are regenerated on every recompile and are never model-written.
 Only the marker regions in `steps/*.py` and `agents/*.py` are editable by the
 fill agent.
 
@@ -525,8 +630,12 @@ creates the file, so a recompile cannot leave a stale one behind.
 | `SWARM_BASE_URL` | *(none)* | Custom OpenAI-compatible endpoint for a `SWARM_MODEL` that is not a known name. |
 | `SWARM_API_KEY_ENV` | *(none)* | *Name* of the environment variable holding that endpoint's key. The key value itself is never written to disk. |
 | `SWARM_FAKE_FILL` | *(none)* | `1` replaces Phase 3 with a deterministic stub fill: no model, no credentials, no `$DSH_HOME`. |
+| `SWARM_FAKE_GENERATE` | *(none)* | `1` replaces the model in **Describe → generate** with a deterministic sentence-per-step draft. |
+| `SWARM_RUN_TEST_MODEL` | *(none)* | `1` makes a **Run** execute the generated project against a keyless `TestModel` instead of the real model — for exercising the run plumbing, never for real output. |
 
-`.env.example` is a copy-pasteable starting point.
+`.env.example` is a copy-pasteable starting point: copy it to `.env` and the
+console script loads it at startup. Only `swarm-builder` (and `docker
+compose`) read `.env`; a bare `uvicorn swarm_builder.main:app` does not.
 
 ---
 

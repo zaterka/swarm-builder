@@ -3,13 +3,14 @@ import { jitterDegForId } from '../jitter';
 import type { SwarmNodeData } from './AgentNode';
 
 export function DecisionNode({ id, data }: NodeProps & { data: SwarmNodeData }) {
-  const { node, isEntry, isExit } = data;
+  const { node, isEntry, isExit, runStatus } = data;
   const branchCount = node.decision?.branches?.length ?? 0;
   return (
     <div
       className="sb-node-sketch sb-kind-decision"
       style={{ '--sb-jitter': `${jitterDegForId(id)}deg` } as React.CSSProperties}
       data-testid={`node-${id}`}
+      data-run-status={runStatus ?? 'idle'}
       data-node-kind="decision"
     >
       {isEntry && <span className="sb-node-corner-tag">START</span>}

@@ -19,6 +19,7 @@ import DecisionNode from './nodes/DecisionNode';
 import JoinNode from './nodes/JoinNode';
 import type { SwarmNodeData } from './nodes/AgentNode';
 import { edgeTypes } from './edges';
+import { deriveRunDisplayStatuses } from '../state/runState';
 import './theme.css';
 
 const nodeTypes = {
@@ -48,6 +49,7 @@ interface PendingConnection {
  */
 export function Canvas() {
   const graph = useGraphStore((s) => s.graph);
+  const run = useGraphStore((s) => s.run);
   const selectedNodeIds = useGraphStore((s) => s.selectedNodeIds);
   const selectedEdgeId = useGraphStore((s) => s.selectedEdgeId);
   const selectNode = useGraphStore((s) => s.selectNode);
@@ -65,6 +67,7 @@ export function Canvas() {
   const flowNodes: Node<SwarmNodeData>[] = useMemo(() => {
     if (!graph) return [];
     const selected = new Set(selectedNodeIds);
+    const runStatuses = deriveRunDisplayStatuses(run, graph.nodes, graph.edges);
     return graph.nodes.map((node) => ({
       id: node.id,
       type: node.kind,
@@ -74,9 +77,10 @@ export function Canvas() {
         node,
         isEntry: node.id === graph.entryNodeId,
         isExit: node.id === graph.exitNodeId,
+        runStatus: runStatuses[node.id] ?? 'idle',
       },
     }));
-  }, [graph, selectedNodeIds]);
+  }, [graph, selectedNodeIds, run]);
 
   const flowEdges: Edge[] = useMemo(() => {
     if (!graph) return [];
@@ -250,7 +254,7 @@ export function Canvas() {
         className="sb-canvas-pane"
         proOptions={{ hideAttribution: true }}
       >
-        <Background />
+        <Background gap={20} size={1.15} color="#d8d1c1" />
         <Controls />
         <MiniMap />
       </ReactFlow>
@@ -285,39 +289,29 @@ function EdgeKindPopover(props: {
   const [joinNodeId, setJoinNodeId] = useState(props.joinNodeOptions[0]?.id ?? '');
 
   return (
-    <div
-      role="dialog"
-      aria-label="Choose edge kind"
-      style={{
-        position: 'absolute',
-        top: 16,
-        right: 16,
-        background: 'white',
-        border: '1px solid #333',
-        borderRadius: 8,
-        padding: 12,
-        zIndex: 10,
-        minWidth: 240,
-      }}
-    >
-      <div style={{ fontWeight: 'bold', marginBottom: 8 }}>What kind of connection is this?</div>
+    <div role="dialog" aria-label="Choose edge kind" className="sb-edge-popover">
+      <div className="sb-edge-popover-title">What kind of connection is this?</div>
 
       {props.sourceKind === 'decision' && (
         <div>
           <label>
-            Match expression:
+            Match expression
             <input value={match} onChange={(e) => setMatch(e.target.value)} autoFocus />
           </label>
-          <div style={{ marginTop: 8 }}>
-            <button onClick={() => props.onBranch(match)}>Add branch</button>
+          <div className="sb-edge-popover-actions">
+            <button className="sb-btn-primary" onClick={() => props.onBranch(match)}>
+              Add branch
+            </button>
             <button onClick={props.onCancel}>Cancel</button>
           </div>
         </div>
       )}
 
       {props.sourceKind !== 'decision' && !props.needsFanoutChoice && (
-        <div>
-          <button onClick={props.onSeq}>Sequential (seq)</button>
+        <div className="sb-edge-popover-actions">
+          <button className="sb-btn-primary" onClick={props.onSeq}>
+            Sequential (seq)
+          </button>
           {props.sourceKind === 'agent' && <button onClick={props.onDelegate}>Delegate (tool call)</button>}
           <button onClick={props.onCancel}>Cancel</button>
         </div>
@@ -325,12 +319,12 @@ function EdgeKindPopover(props: {
 
       {props.sourceKind !== 'decision' && props.needsFanoutChoice && (
         <div>
-          <div style={{ fontSize: 12, marginBottom: 6 }}>
+          <div className="sb-edge-popover-note">
             This node already has an outgoing connection. A second successor must fan out to an
             explicit join node, or it will silently lose data.
           </div>
           <label>
-            Join node:
+            Join node
             <select value={joinNodeId} onChange={(e) => setJoinNodeId(e.target.value)}>
               {props.joinNodeOptions.length === 0 && <option value="">(create a join node first)</option>}
               {props.joinNodeOptions.map((opt) => (
@@ -340,8 +334,8 @@ function EdgeKindPopover(props: {
               ))}
             </select>
           </label>
-          <div style={{ marginTop: 8 }}>
-            <button disabled={!joinNodeId} onClick={() => props.onFanout(joinNodeId)}>
+          <div className="sb-edge-popover-actions">
+            <button className="sb-btn-primary" disabled={!joinNodeId} onClick={() => props.onFanout(joinNodeId)}>
               Fan out to join
             </button>
             <button onClick={props.onCancel}>Cancel</button>

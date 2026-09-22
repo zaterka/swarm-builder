@@ -15,6 +15,7 @@ system as built*, and points at the code that owns each piece.
 - [The deps_type seam](#the-deps_type-seam)
 - [Model-route inheritance and the two emission paths](#model-route-inheritance-and-the-two-emission-paths)
 - [Why the harness SDK tie-in was dropped](#why-the-harness-sdk-tie-in-was-dropped)
+- [Running a workflow and generating a graph](#running-a-workflow-and-generating-a-graph)
 - [Build the docs against the code](#build-the-docs-against-the-code)
 
 ## The one-sentence version
@@ -681,6 +682,80 @@ fill loop — `compile/agent.py` is a small enough surface to sit behind an
 interface with a harness-backed implementation added then.
 [`../PLAN.md`](../PLAN.md)'s retained probe facts exist so that decision can
 be revisited with evidence rather than re-probed from scratch.
+
+## Running a workflow and generating a graph
+
+Two features added after v1 (`PLAN-V2-FEATURES.md`), both built on seams v1
+already had rather than new ones.
+
+**Run (`compile/run.py`, `routes/runs.py`, `store/runs.py`).** The graph
+document is not executable: `programmatic` bodies exist only after Phase 3
+writes them. So *Run* executes the **generated project**, compiling first
+when it is stale — through the same `run_compile`, with `finalize=False` so
+the compile's phase events stream into the run's job and the run owns the
+terminal event. A run is a `Job` of `kind="run"` in the same registry, so it
+inherits the ring buffer, `Last-Event-ID` replay, the one-live-job-per-graph
+rule and cancellation. What is new is small:
+
+- `scaffold.py` emits one more forbidden-tier file, `run/stream_run.py`. It
+  wraps every step function with `functools.wraps` **before** importing
+  `graph.py` (which binds steps by importing their names), so
+  `builder.step(...)` registers the wrapper; `typing.get_type_hints` follows
+  `__wrapped__` for its globals, so pydantic-graph's type inference still
+  resolves the real step's annotations. Each step start/finish/failure is one
+  JSON line on stdout. `graph.iter()` was rejected for this: it does not yield
+  the tasks it spawns after a join, so per-node tracing through iteration is
+  incomplete.
+- `compile/run.py` spawns `uv run python run/stream_run.py <input.json>` with
+  `asyncio.create_subprocess_exec` in its own session, relays each line as a
+  `node`/`run`/`log` event, and kills the process **group** on timeout or
+  cancel. Unlike Phase 5 the environment is passed through unstripped — a run
+  needs credentials — which is the trust-boundary change the README states.
+- `routes/health.py` adds `runReady`/`runBlockers`: every compile blocker plus
+  a credential check for the resolved route, so the button is disabled with a
+  named reason rather than failing a job.
+
+Decision and join nodes are builder constructs with no function to wrap, so
+the canvas derives their status from their neighbours
+(`web/src/state/runState.ts` `deriveRunDisplayStatuses`).
+
+**Generate (`compile/generate.py`, `routes/generate.py`).** The model's
+output is a `GraphDraft` — nodes named by title, edges by title, no ids,
+positions, branches or `joinNodeId`. `materialize()` derives all of that
+deterministically (ids via `slugify_titles`, the function `slug.ts` mirrors,
+so a generated node has exactly the id a typed title would get), promotes a
+bare multi-successor to a fan-out, turns edges into a join node into `join`
+edges, adds undeclared state fields, and lays nodes out by rank. Phase 1's
+own `review()` is then the oracle: its errors are fed back to the model for
+at most two repair rounds — the same propose/check/report loop the fill agent
+runs with `parse_check`. `SWARM_FAKE_GENERATE=1` is the model-free twin of
+`SWARM_FAKE_FILL=1`.
+
+**LangGraph target (`compile/langgraph/`).** A ``target="langgraph"``
+compile runs the five standard phases and then four more on the *validated*
+pydantic-graph project. The shape mirrors the pipeline it extends:
+`scaffold.py` is deterministic and captures a boundary baseline over
+`nodes/`; `convert.py` is the one model call, a `FillSession` bound to the
+LangGraph project with the same `read_file`/`write_region`/`parse_check`
+tools plus a read-only `read_source_file` over the pydantic-graph project;
+`boundary.capture_baseline(permitted_dirs=...)` and
+`validate.run_keyless_gate(import_snippet=...)` are the generalized Phase-4/5
+primitives. Facts the emitter rests on (probed in `spike/langgraph_probe`,
+langgraph 1.2.12 on Python 3.14): `add_edge` takes a list only as the
+*start* (fan-in), so a fan-out is one edge per arm; two nodes writing the same
+non-reducer key in one superstep raise `InvalidUpdateError`, so arms feeding a
+join write a per-join `Annotated[list, operator.add]` channel instead of
+`payload`; `get_graph().nodes` is exactly the canvas node set plus
+`__start__`/`__end__` (no synthetic fork nodes); `draw_mermaid()` is a stable
+golden; `Runtime[Context]` injection works for async nodes with `context=` on
+`ainvoke`; `FakeListChatModel` lacks `bind_tools`, so the dry run's fake
+overrides it; a conditional-edge router returns the *path-map key*, not the
+node name; and a list start key waits for every source, so a join fed by
+mutually exclusive decision branches gets one edge per source (both found by
+the first real-model compile, and both now covered by the fixture gate that
+runs every exported project's dry run in the server's venv). Model routes map through the same `_resolve_emission` decision
+procedure as the pydantic-graph target (`langgraph/models.py`), rendered as
+`init_chat_model(model, model_provider=...)` or `ChatOpenAI(base_url=...)`.
 
 ## Build the docs against the code
 

@@ -6,12 +6,16 @@ import Canvas from './canvas/Canvas';
 import Palette from './panels/Palette';
 import Inspector from './panels/Inspector';
 import CompilePanel from './panels/CompilePanel';
+import RunPanel from './panels/RunPanel';
+import GeneratePanel from './panels/GeneratePanel';
+import type { FindingOut, SwarmGraph } from './api/schema';
 import GraphPicker from './panels/GraphPicker';
 import './App.css';
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
 
 type Screen = { name: 'picker' } | { name: 'workspace' };
+type DrawerTab = 'compile' | 'run';
 
 /**
  * Top-level shell (PLAN.md's "Frontend" section doesn't specify one --
@@ -22,6 +26,10 @@ type Screen = { name: 'picker' } | { name: 'workspace' };
  */
 export function App() {
   const [screen, setScreen] = useState<Screen>({ name: 'picker' });
+  const [drawerTab, setDrawerTab] = useState<DrawerTab>('compile');
+  const [showRegenerate, setShowRegenerate] = useState(false);
+  const [generatedNotice, setGeneratedNotice] = useState<{ warnings: FindingOut[]; attempts: number } | null>(null);
+  const selectNodes = useGraphStore((s) => s.selectNodes);
   const graph = useGraphStore((s) => s.graph);
   const dirty = useGraphStore((s) => s.dirty);
   const saveStatus = useGraphStore((s) => s.saveStatus);
@@ -115,26 +123,80 @@ export function App() {
     setScreen({ name: 'workspace' });
   };
 
+  // A generated graph is already saved by the server; load it as an ordinary
+  // document, select every node so the review is visible at a glance, and
+  // keep a dismissible notice with the reviewer's warnings.
+  const onGenerated = (g: SwarmGraph, warnings: FindingOut[], attempts: number) => {
+    loadGraph(g);
+    selectNodes((g.nodes ?? []).map((n) => n.id));
+    setGeneratedNotice({ warnings, attempts });
+    setShowRegenerate(false);
+    setScreen({ name: 'workspace' });
+  };
+
   if (screen.name === 'picker') {
-    return <GraphPicker onOpen={openGraph} onCreateNew={createNew} />;
+    return <GraphPicker onOpen={openGraph} onCreateNew={createNew} onGenerated={onGenerated} />;
   }
 
   return (
     <div className="sb-app-shell">
       <div className="sb-toolbar">
-        <button onClick={() => setScreen({ name: 'picker' })}>← Graphs</button>
+        <button className="sb-btn-ghost" onClick={() => setScreen({ name: 'picker' })}>
+          ← Graphs
+        </button>
         <span className="sb-graph-name">{graph?.name}</span>
-        <span className="sb-save-status">
+        <button
+          className="sb-btn-ghost sb-btn-sm"
+          onClick={() => setShowRegenerate((v) => !v)}
+          title="Describe the workflow in prose and replace this canvas with a generated graph"
+        >
+          {showRegenerate ? 'Close' : 'Describe…'}
+        </button>
+        <span className="sb-save-status" data-status={saveStatus}>
           {saveStatus === 'saving' && 'Saving…'}
           {saveStatus === 'saved' && 'Saved'}
           {saveStatus === 'error' && (
             <>
               Save failed: {saveError}{' '}
-              <button onClick={() => void doSave()}>Retry</button>
+              <button className="sb-btn-sm" onClick={() => void doSave()}>
+                Retry
+              </button>
             </>
           )}
         </span>
       </div>
+      {showRegenerate && graph && (
+        <div className="sb-generate-popover">
+          <GeneratePanel
+            compact
+            replaceGraphId={graph.id}
+            keepName={graph.name}
+            onGenerated={onGenerated}
+            onCancel={() => setShowRegenerate(false)}
+          />
+        </div>
+      )}
+      {generatedNotice && (
+        <div className="sb-generated-notice" role="status">
+          <span>
+            Generated from your description
+            {generatedNotice.attempts > 1 ? ` (${generatedNotice.attempts} drafts)` : ''} — review the
+            nodes, then Compile or Run.
+          </span>
+          {generatedNotice.warnings.length > 0 && (
+            <ul>
+              {generatedNotice.warnings.map((w, i) => (
+                <li key={`${w.code}-${i}`}>
+                  <strong>{w.code}</strong>: {w.message}
+                </li>
+              ))}
+            </ul>
+          )}
+          <button className="sb-btn-sm" onClick={() => setGeneratedNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <div className="sb-workspace">
         <div className="sb-palette-pane">
           <Palette />
@@ -149,7 +211,32 @@ export function App() {
         </div>
       </div>
       <div className="sb-compile-drawer">
-        <CompilePanel />
+        <div className="sb-drawer-tabs" role="tablist">
+          <button
+            role="tab"
+            aria-selected={drawerTab === 'compile'}
+            className={drawerTab === 'compile' ? 'sb-tab-active' : ''}
+            onClick={() => setDrawerTab('compile')}
+          >
+            Compile
+          </button>
+          <button
+            role="tab"
+            aria-selected={drawerTab === 'run'}
+            className={drawerTab === 'run' ? 'sb-tab-active' : ''}
+            onClick={() => setDrawerTab('run')}
+          >
+            Run
+          </button>
+        </div>
+        {/* Both panels stay mounted so a live SSE subscription survives a tab
+            switch; the inactive one is only hidden. */}
+        <div hidden={drawerTab !== 'compile'}>
+          <CompilePanel />
+        </div>
+        <div hidden={drawerTab !== 'run'}>
+          <RunPanel />
+        </div>
       </div>
     </div>
   );

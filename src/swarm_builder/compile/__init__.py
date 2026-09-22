@@ -97,7 +97,7 @@ def default_scaffold_model() -> ResolvedModel:
         "\n"
         "\n"
         "def _resolve_default_model() -> str:\n"
-        '    return os.environ.get("SWARM_MODEL", DEFAULT_MODEL)\n'
+        '    return os.environ.get("SWARM_MODEL") or DEFAULT_MODEL\n'
     )
     return ResolvedModel(
         helper_source=helper_source,

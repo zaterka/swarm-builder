@@ -345,6 +345,80 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/graphs/{graph_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Runs Route
+         * @description Persisted runs for a graph, newest first (at most 20 are kept).
+         */
+        get: operations["list_runs_route_api_graphs__graph_id__runs_get"];
+        put?: never;
+        /**
+         * Start Run
+         * @description Start one run and return its job id.
+         *
+         *     The input is coerced up front so a bad input is a 422 here rather
+         *     than a failed job. Staleness is checked here too, so the response can
+         *     say whether a compile will precede the run.
+         */
+        post: operations["start_run_api_graphs__graph_id__runs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graphs/{graph_id}/runs/{run_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Run Route
+         * @description One persisted run record (the live view is the job snapshot).
+         */
+        get: operations["get_run_route_api_graphs__graph_id__runs__run_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graphs/generate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Graph Route
+         * @description Generate, save, and return a graph for ``body.description``.
+         *
+         *     Raises:
+         *         HTTPException: 422 when every attempt failed (the detail carries the
+         *             last review findings as ``problems``); 503 when the resolved
+         *             route is unmappable, no model is configured, or the generator
+         *             cannot be imported; 500 when the graph cannot be saved.
+         */
+        post: operations["generate_graph_route_api_graphs_generate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -406,6 +480,12 @@ export interface components {
             compileId: string;
             /** Graphid */
             graphId: string;
+            /**
+             * Kind
+             * @default compile
+             * @enum {string}
+             */
+            kind: "compile" | "run";
             /**
              * Status
              * @enum {string}
@@ -514,6 +594,12 @@ export interface components {
             projectPath: string;
             /** Runcommand */
             runCommand: string;
+            /**
+             * Target
+             * @default pydantic-graph
+             * @enum {string}
+             */
+            target: "pydantic-graph" | "langgraph";
         };
         /**
          * FanoutEdge
@@ -550,6 +636,40 @@ export interface components {
             message: string;
             /** Nodeids */
             nodeIds: string[];
+        };
+        /**
+         * GenerateGraphRequest
+         * @description Body of ``POST /api/graphs/generate``.
+         */
+        GenerateGraphRequest: {
+            /** Description */
+            description: string;
+            /** Name */
+            name?: string | null;
+            /**
+             * Graphid
+             * @description Reuse an existing graph id (replace its document); default mints a new one.
+             */
+            graphId?: string | null;
+            modelOverride?: components["schemas"]["ModelSelection"] | null;
+        };
+        /** GenerateGraphResponse */
+        GenerateGraphResponse: {
+            graph: components["schemas"]["SwarmGraph"];
+            /** Warnings */
+            warnings: components["schemas"]["FindingOut"][];
+            /** Attempts */
+            attempts: number;
+            model: components["schemas"]["GenerateModelOut"];
+        };
+        /** GenerateModelOut */
+        GenerateModelOut: {
+            /** Provider */
+            provider: string;
+            /** Model */
+            model: string;
+            /** Source */
+            source: string;
         };
         /**
          * GraphListError
@@ -629,6 +749,10 @@ export interface components {
             compileReady: boolean;
             /** Blockers */
             blockers: string[];
+            /** Runready */
+            runReady: boolean;
+            /** Runblockers */
+            runBlockers: string[];
         };
         /**
          * JoinEdge
@@ -724,6 +848,26 @@ export interface components {
             outputType: "str" | "json" | "list[str]";
         };
         /**
+         * NodeRunRecord
+         * @description What one step reported during a run (the last ``node`` frame wins).
+         */
+        NodeRunRecord: {
+            /** Status */
+            status: string;
+            /** Inputs */
+            inputs?: unknown | null;
+            /** Output */
+            output?: unknown | null;
+            /** Statedelta */
+            stateDelta?: {
+                [key: string]: unknown;
+            } | null;
+            /** Error */
+            error?: string | null;
+            /** Durationms */
+            durationMs?: number | null;
+        };
+        /**
          * Position
          * @description Canvas coordinates for a node. Presentation-only: never read by
          *     the emitter, kept purely so the canvas restores node placement.
@@ -812,6 +956,50 @@ export interface components {
             /** Models */
             models: components["schemas"]["ModelInfoOut"][];
         };
+        /** RunListResponse */
+        RunListResponse: {
+            /** Runs */
+            runs: components["schemas"]["RunRecord"][];
+        };
+        /**
+         * RunRecord
+         * @description One persisted run.
+         */
+        RunRecord: {
+            /** Runid */
+            runId: string;
+            /** Graphid */
+            graphId: string;
+            /** Status */
+            status: string;
+            /** Createdat */
+            createdAt: string;
+            /** Finishedat */
+            finishedAt?: string | null;
+            /** Input */
+            input?: unknown | null;
+            /** Output */
+            output?: unknown | null;
+            /** State */
+            state?: {
+                [key: string]: unknown;
+            } | null;
+            /** Error */
+            error?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Durationms */
+            durationMs?: number | null;
+            /**
+             * Compiled
+             * @default false
+             */
+            compiled: boolean;
+            /** Nodes */
+            nodes?: {
+                [key: string]: components["schemas"]["NodeRunRecord"];
+            };
+        };
         /**
          * SeqEdge
          * @description A plain sequential edge: ``builder.add_edge(source, target)``.
@@ -834,10 +1022,21 @@ export interface components {
         /**
          * StartCompileRequest
          * @description Body of ``POST /api/compile``.
+         *
+         *     ``target`` selects the export: ``pydantic-graph`` (default, the five
+         *     phases) or ``langgraph`` (the five phases, then a conversion of the
+         *     validated project into a LangGraph export under
+         *     ``workspace/projects-langgraph/<graphId>/``).
          */
         StartCompileRequest: {
             /** Graphid */
             graphId: string;
+            /**
+             * Target
+             * @default pydantic-graph
+             * @enum {string}
+             */
+            target: "pydantic-graph" | "langgraph";
         };
         /**
          * StartCompileResponse
@@ -849,6 +1048,33 @@ export interface components {
         StartCompileResponse: {
             /** Compileid */
             compileId: string;
+        };
+        /**
+         * StartRunRequest
+         * @description Body of ``POST /api/graphs/:id/runs``.
+         *
+         *     ``input`` is interpreted by the entry node's ``inputType``
+         *     (``compile/run.py``'s ``coerce_input``): a ``str`` port takes the
+         *     string verbatim; ``json``/``list[str]`` take the parsed value or a
+         *     JSON string of it. ``compileIfStale`` (default on) recompiles a
+         *     missing or out-of-date project before running; off, a stale project
+         *     is a 409.
+         */
+        StartRunRequest: {
+            /** Input */
+            input: unknown;
+            /**
+             * Compileifstale
+             * @default true
+             */
+            compileIfStale: boolean;
+        };
+        /** StartRunResponse */
+        StartRunResponse: {
+            /** Runid */
+            runId: string;
+            /** Willcompile */
+            willCompile: boolean;
         };
         /**
          * StateField
@@ -1204,7 +1430,9 @@ export interface operations {
     };
     export_graph_api_graphs__graph_id__export_get: {
         parameters: {
-            query?: never;
+            query?: {
+                target?: "pydantic-graph" | "langgraph";
+            };
             header?: never;
             path: {
                 graph_id: string;
@@ -1429,6 +1657,175 @@ export interface operations {
                 };
             };
             /** @description the compile subsystem is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_runs_route_api_graphs__graph_id__runs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                graph_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_run_api_graphs__graph_id__runs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                graph_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartRunResponse"];
+                };
+            };
+            /** @description no such graph */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description a compile or run is already live, or the project is stale */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the input does not fit the entry node's port type */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the run subsystem is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_run_route_api_graphs__graph_id__runs__run_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                graph_id: string;
+                run_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunRecord"];
+                };
+            };
+            /** @description no such run record */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    generate_graph_route_api_graphs_generate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenerateGraphRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GenerateGraphResponse"];
+                };
+            };
+            /** @description the model could not produce a review-clean graph */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the model API refused or failed the request */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no usable route or credential, or the generator is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

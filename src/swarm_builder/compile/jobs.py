@@ -57,7 +57,14 @@ from typing import Literal
 #: "Five phases, each emitting SSE progress" and the endpoint table's
 #: ``GET /api/compile/:compileId/events`` row lists exactly these five
 #: frame types).
-EventType = Literal["phase", "log", "warning", "done", "error"]
+EventType = Literal["phase", "log", "warning", "done", "error", "run", "node"]
+
+#: What a job is doing. ``compile`` is the five-phase pipeline; ``run``
+#: executes an already-compiled project (optionally compiling first when
+#: the project is stale). Both kinds share this registry, the event log,
+#: the SSE stream and the one-live-job-per-graph rule, because both write
+#: into the same project directory and must never overlap.
+JobKind = Literal["compile", "run"]
 
 #: Job lifecycle status. A job is "live" (see :meth:`Job.is_live`) in
 #: the ``queued``/``running`` states and "finished" in the rest.
@@ -194,9 +201,13 @@ class Job:
     one-concurrent-compile-per-graph invariant at creation time.
     """
 
-    def __init__(self, compile_id: str, graph_id: str) -> None:
+    def __init__(self, compile_id: str, graph_id: str, kind: JobKind = "compile") -> None:
         self.compile_id = compile_id
         self.graph_id = graph_id
+        self.kind: JobKind = kind
+        #: Compile target (``pydantic-graph``/``langgraph``); set by the
+        #: pipeline when it starts, read by its phase emitters for ``total``.
+        self.target: str = "pydantic-graph"
         self.status: JobStatus = "queued"
         self.created_at: datetime = datetime.now(UTC)
         self.started_at: datetime | None = None
@@ -332,6 +343,7 @@ class Job:
         return {
             "compileId": self.compile_id,
             "graphId": self.graph_id,
+            "kind": self.kind,
             "status": self.status,
             "createdAt": self.created_at.isoformat(),
             "startedAt": self.started_at.isoformat() if self.started_at else None,
@@ -393,13 +405,16 @@ class JobRegistry:
         #: finished job to evict without a linear rescan of self._jobs.
         self._order: list[str] = []
 
-    def register(self, compile_id: str, graph_id: str) -> Job:
+    def register(self, compile_id: str, graph_id: str, kind: JobKind = "compile") -> Job:
         """Create and register a new job for ``graph_id``.
 
         Args:
             compile_id: Unique id for the new job (the route layer
                 mints this, typically a uuid).
             graph_id: The graph being compiled.
+            kind: ``compile`` (default) or ``run``. A live job of
+                *either* kind blocks a new one for the same graph: both
+                touch the same project directory.
 
         Returns:
             The newly created, ``queued`` :class:`Job`.
@@ -413,7 +428,7 @@ class JobRegistry:
         for job in self._jobs.values():
             if job.graph_id == graph_id and job.is_live():
                 raise GraphCompileInProgressError(graph_id, job.compile_id)
-        job = Job(compile_id, graph_id)
+        job = Job(compile_id, graph_id, kind)
         self._jobs[compile_id] = job
         self._order.append(compile_id)
         self._evict_finished_overflow()
@@ -589,6 +604,7 @@ __all__ = [
     "EventType",
     "GraphCompileInProgressError",
     "Job",
+    "JobKind",
     "JobNotFoundError",
     "JobRegistry",
     "JobResult",

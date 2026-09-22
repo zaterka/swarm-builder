@@ -302,6 +302,20 @@
               "type": "string",
               "title": "Graph Id"
             }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "pydantic-graph",
+                "langgraph"
+              ],
+              "type": "string",
+              "default": "pydantic-graph",
+              "title": "Target"
+            }
           }
         ],
         "responses": {
@@ -528,6 +542,198 @@
           }
         }
       }
+    },
+    "/api/graphs/{graph_id}/runs": {
+      "post": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Start Run",
+        "description": "Start one run and return its job id.\n\nThe input is coerced up front so a bad input is a 422 here rather\nthan a failed job. Staleness is checked here too, so the response can\nsay whether a compile will precede the run.",
+        "operationId": "start_run_api_graphs__graph_id__runs_post",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartRunRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartRunResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such graph"
+          },
+          "409": {
+            "description": "a compile or run is already live, or the project is stale"
+          },
+          "422": {
+            "description": "the input does not fit the entry node's port type"
+          },
+          "503": {
+            "description": "the run subsystem is unavailable"
+          }
+        }
+      },
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "List Runs Route",
+        "description": "Persisted runs for a graph, newest first (at most 20 are kept).",
+        "operationId": "list_runs_route_api_graphs__graph_id__runs_get",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graphs/{graph_id}/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "runs"
+        ],
+        "summary": "Get Run Route",
+        "description": "One persisted run record (the live view is the job snapshot).",
+        "operationId": "get_run_route_api_graphs__graph_id__runs__run_id__get",
+        "parameters": [
+          {
+            "name": "graph_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Graph Id"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Run Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such run record"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/graphs/generate": {
+      "post": {
+        "tags": [
+          "generate"
+        ],
+        "summary": "Generate Graph Route",
+        "description": "Generate, save, and return a graph for ``body.description``.\n\nRaises:\n    HTTPException: 422 when every attempt failed (the detail carries the\n        last review findings as ``problems``); 503 when the resolved\n        route is unmappable, no model is configured, or the generator\n        cannot be imported; 500 when the graph cannot be saved.",
+        "operationId": "generate_graph_route_api_graphs_generate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateGraphRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateGraphResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the model could not produce a review-clean graph"
+          },
+          "502": {
+            "description": "the model API refused or failed the request"
+          },
+          "503": {
+            "description": "no usable route or credential, or the generator is unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -618,6 +824,15 @@
           "graphId": {
             "type": "string",
             "title": "Graphid"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "compile",
+              "run"
+            ],
+            "title": "Kind",
+            "default": "compile"
           },
           "status": {
             "type": "string",
@@ -811,6 +1026,15 @@
           "runCommand": {
             "type": "string",
             "title": "Runcommand"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "pydantic-graph",
+              "langgraph"
+            ],
+            "title": "Target",
+            "default": "pydantic-graph"
           }
         },
         "type": "object",
@@ -883,6 +1107,107 @@
         ],
         "title": "FindingOut",
         "description": "One review finding, as the canvas Inspector displays it."
+      },
+      "GenerateGraphRequest": {
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "graphId": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Graphid",
+            "description": "Reuse an existing graph id (replace its document); default mints a new one."
+          },
+          "modelOverride": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelSelection"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "description"
+        ],
+        "title": "GenerateGraphRequest",
+        "description": "Body of ``POST /api/graphs/generate``."
+      },
+      "GenerateGraphResponse": {
+        "properties": {
+          "graph": {
+            "$ref": "#/components/schemas/SwarmGraph"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/FindingOut"
+            },
+            "type": "array",
+            "title": "Warnings"
+          },
+          "attempts": {
+            "type": "integer",
+            "title": "Attempts"
+          },
+          "model": {
+            "$ref": "#/components/schemas/GenerateModelOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "graph",
+          "warnings",
+          "attempts",
+          "model"
+        ],
+        "title": "GenerateGraphResponse"
+      },
+      "GenerateModelOut": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "source"
+        ],
+        "title": "GenerateModelOut"
       },
       "GraphListError": {
         "properties": {
@@ -1034,6 +1359,17 @@
             },
             "type": "array",
             "title": "Blockers"
+          },
+          "runReady": {
+            "type": "boolean",
+            "title": "Runready"
+          },
+          "runBlockers": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Runblockers"
           }
         },
         "type": "object",
@@ -1049,7 +1385,9 @@
           "workspaceWritable",
           "webDistPresent",
           "compileReady",
-          "blockers"
+          "blockers",
+          "runReady",
+          "runBlockers"
         ],
         "title": "HealthResponse",
         "description": "The full ``GET /api/health`` response body."
@@ -1241,6 +1579,72 @@
         ],
         "title": "NodeIo",
         "description": "A node's declared input/output port types.\n\nPhase 1 review uses these to reject a port-type mismatch across an\nedge and, for a decision's branch targets, to enforce that the\ntarget's ``input_type`` equals the decision's *source step's*\n``output_type`` -- see :class:`DecisionSpec` for why the source step is\nthe relevant node rather than the decision itself."
+      },
+      "NodeRunRecord": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "inputs": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inputs"
+          },
+          "output": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "stateDelta": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statedelta"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "durationMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durationms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "NodeRunRecord",
+        "description": "What one step reported during a run (the last ``node`` frame wins)."
       },
       "Position": {
         "properties": {
@@ -1434,6 +1838,137 @@
         "title": "RouteOut",
         "description": "One configured route, with the picker-relevant classification fields.\n\n``emission``/``required_extra``/``unmappable_reason`` are the outcome\nof :func:`swarm_builder.inherit.routes.classify_route`, exposed so the\npicker can disable or explain an unusable route before a compile is\nattempted."
       },
+      "RunListResponse": {
+        "properties": {
+          "runs": {
+            "items": {
+              "$ref": "#/components/schemas/RunRecord"
+            },
+            "type": "array",
+            "title": "Runs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runs"
+        ],
+        "title": "RunListResponse"
+      },
+      "RunRecord": {
+        "properties": {
+          "runId": {
+            "type": "string",
+            "title": "Runid"
+          },
+          "graphId": {
+            "type": "string",
+            "title": "Graphid"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "Createdat"
+          },
+          "finishedAt": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finishedat"
+          },
+          "input": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input"
+          },
+          "output": {
+            "anyOf": [
+              {},
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "State"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "durationMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Durationms"
+          },
+          "compiled": {
+            "type": "boolean",
+            "title": "Compiled",
+            "default": false
+          },
+          "nodes": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/NodeRunRecord"
+            },
+            "type": "object",
+            "title": "Nodes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runId",
+          "graphId",
+          "status",
+          "createdAt"
+        ],
+        "title": "RunRecord",
+        "description": "One persisted run."
+      },
       "SeqEdge": {
         "properties": {
           "kind": {
@@ -1481,6 +2016,15 @@
           "graphId": {
             "type": "string",
             "title": "Graphid"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "pydantic-graph",
+              "langgraph"
+            ],
+            "title": "Target",
+            "default": "pydantic-graph"
           }
         },
         "type": "object",
@@ -1488,7 +2032,7 @@
           "graphId"
         ],
         "title": "StartCompileRequest",
-        "description": "Body of ``POST /api/compile``."
+        "description": "Body of ``POST /api/compile``.\n\n``target`` selects the export: ``pydantic-graph`` (default, the five\nphases) or ``langgraph`` (the five phases, then a conversion of the\nvalidated project into a LangGraph export under\n``workspace/projects-langgraph/<graphId>/``)."
       },
       "StartCompileResponse": {
         "properties": {
@@ -1503,6 +2047,42 @@
         ],
         "title": "StartCompileResponse",
         "description": "Body of a successful ``POST /api/compile``.\n\nOnly the id: the compile itself runs in the background and reports\neverything else through the event stream and the status snapshot."
+      },
+      "StartRunRequest": {
+        "properties": {
+          "input": {
+            "title": "Input"
+          },
+          "compileIfStale": {
+            "type": "boolean",
+            "title": "Compileifstale",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "input"
+        ],
+        "title": "StartRunRequest",
+        "description": "Body of ``POST /api/graphs/:id/runs``.\n\n``input`` is interpreted by the entry node's ``inputType``\n(``compile/run.py``'s ``coerce_input``): a ``str`` port takes the\nstring verbatim; ``json``/``list[str]`` take the parsed value or a\nJSON string of it. ``compileIfStale`` (default on) recompiles a\nmissing or out-of-date project before running; off, a stale project\nis a 409."
+      },
+      "StartRunResponse": {
+        "properties": {
+          "runId": {
+            "type": "string",
+            "title": "Runid"
+          },
+          "willCompile": {
+            "type": "boolean",
+            "title": "Willcompile"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runId",
+          "willCompile"
+        ],
+        "title": "StartRunResponse"
       },
       "StateField": {
         "properties": {

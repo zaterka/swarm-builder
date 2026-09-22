@@ -371,7 +371,13 @@ class FillSession:
     """
 
     def __init__(
-        self, project_root: Path
+        self,
+        project_root: Path,
+        *,
+        editable_dir_parts: tuple[str, ...] = STEPS_DIR_PARTS,
+        forbidden_files: tuple[str, ...] = FORBIDDEN_FILES,
+        forbidden_directories: tuple[str, ...] = FORBIDDEN_DIRECTORIES,
+        source_root: Path | None = None,
     ) -> None:
         """Bind a session to a scaffolded project directory.
 
@@ -379,8 +385,21 @@ class FillSession:
             project_root: The project directory every tool path is
                 confined to. Stored already resolved, so the guard is
                 computed once and cannot drift mid-run.
+            editable_dir_parts: Project-relative directory holding the
+                marker-bearing modules ``write_region`` may edit. The
+                pydantic-graph fill uses ``steps/``; the LangGraph
+                conversion (``compile/langgraph``) uses ``nodes/``.
+            forbidden_files: File names quoted in refusal messages.
+            forbidden_directories: Directory names quoted in refusals.
+            source_root: When set, :meth:`read_source_file` may read files
+                inside this second, read-only root -- the conversion
+                agent's view of the validated pydantic-graph project.
         """
         self.project_root = project_root.resolve()
+        self.editable_dir_parts = editable_dir_parts
+        self.forbidden_files = forbidden_files
+        self.forbidden_directories = forbidden_directories
+        self.source_root = source_root.resolve() if source_root is not None else None
         self.written_node_ids: list[str] = []
 
     # -- confinement --------------------------------------------------
@@ -423,13 +442,13 @@ class FillSession:
         """
         resolved = self._resolve(name)
         relative = resolved.relative_to(self.project_root)
-        expected_parent = Path(*STEPS_DIR_PARTS)
+        expected_parent = Path(*self.editable_dir_parts)
         if relative.parent != expected_parent or relative.suffix != ".py":
             raise ModelRetry(
                 f"{name!r} is not editable. The only editable files are "
-                f"{'/'.join(STEPS_DIR_PARTS)}/<node_id>.py. Everything else -- "
-                f"in particular {' and '.join(FORBIDDEN_FILES)}, everything under "
-                f"{'/'.join(FORBIDDEN_DIRECTORIES)}/, and every agents/ module -- is off limits."
+                f"{'/'.join(self.editable_dir_parts)}/<node_id>.py. Everything else -- "
+                f"in particular {' and '.join(self.forbidden_files)} and everything under "
+                f"{', '.join(d + '/' for d in self.forbidden_directories)} -- is off limits."
             )
         if not resolved.is_file():
             raise ModelRetry(f"{name!r} does not exist in this project.")
@@ -497,7 +516,7 @@ class FillSession:
         if resolved.stem != node_id:
             raise ModelRetry(
                 f"node id {node_id!r} does not match file name {resolved.name!r}. "
-                f"Write to src/swarm_workflow/steps/{node_id}.py instead."
+                f"Write to {'/'.join(self.editable_dir_parts)}/{node_id}.py instead."
             )
 
         original = resolved.read_text(encoding="utf-8")
@@ -599,14 +618,50 @@ class FillSession:
 
     def _fillable_module_names(self) -> set[str]:
         """Return the project-relative paths of the existing step modules."""
-        steps_dir = self.project_root.joinpath(*STEPS_DIR_PARTS)
+        steps_dir = self.project_root.joinpath(*self.editable_dir_parts)
         if not steps_dir.is_dir():
             return set()
         return {
-            "/".join((*STEPS_DIR_PARTS, path.name))
+            "/".join((*self.editable_dir_parts, path.name))
             for path in steps_dir.glob("*.py")
             if path.name != "__init__.py"
         }
+
+    # -- tool 4 (conversion only): read_source_file ----------------------
+
+    def read_source_file(self, name: str) -> str:
+        """Read one file of the *source* project this session converts from.
+
+        Read-only and confined to ``source_root`` exactly as
+        :meth:`read_file` is confined to the project being written; there
+        is no corresponding writer, so the source project can never be
+        altered by the agent.
+
+        Args:
+            name: Source-project-relative path, e.g.
+                ``src/swarm_workflow/steps/intake.py``.
+
+        Returns:
+            The file's full text.
+
+        Raises:
+            ModelRetry: If this session has no source project, or the path
+                escapes it or is not a readable UTF-8 file.
+        """
+        if self.source_root is None:
+            raise ModelRetry("this session has no source project to read from")
+        try:
+            resolved = confine_path(self.source_root, name)
+        except PathEscapesRootError as exc:
+            raise ModelRetry(
+                f"{exc}. Every source path must resolve inside {self.source_root}."
+            ) from exc
+        if not resolved.is_file():
+            raise ModelRetry(f"{name!r} is not a file in the source project.")
+        try:
+            return resolved.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ModelRetry(f"{name!r} is not UTF-8 text: {exc}") from exc
 
 
 def _truncate(text: str, limit: int) -> tuple[str, bool]:

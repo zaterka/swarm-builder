@@ -47,6 +47,11 @@ from swarm_builder.compile import (
 _STEPS_DIR = PurePosixPath("src/swarm_workflow/steps")
 _AGENTS_DIR = PurePosixPath("src/swarm_workflow/agents")
 
+#: The pydantic-graph project's permitted directories, as the default for
+#: :func:`capture_baseline`. A LangGraph project passes its own
+#: (``compile/langgraph``); the check itself is directory-agnostic.
+DEFAULT_PERMITTED_DIRS: tuple[str, ...] = (str(_STEPS_DIR), str(_AGENTS_DIR))
+
 #: Directory names never treated as part of the scaffolded set: both are
 #: produced by *running* Python against the project (the golden-render
 #: subprocess scaffold.py itself shells out to, and anything Phase 5's
@@ -163,6 +168,9 @@ class ProjectBaseline:
     forbidden_hashes: dict[str, str] = field(default_factory=dict)
     permitted_regions: dict[str, RegionSnapshot] = field(default_factory=dict)
     scaffolded_paths: frozenset[str] = field(default_factory=frozenset)
+    #: The directories whose marker-bearing modules were treated as
+    #: permitted when this baseline was captured.
+    permitted_dirs: tuple[str, ...] = DEFAULT_PERMITTED_DIRS
 
 
 @dataclass(frozen=True)
@@ -197,8 +205,10 @@ class _ParsedRegions:
         return tuple(names)
 
 
-def _is_permitted_marker_path(rel_path: PurePosixPath) -> bool:
-    """True for a ``steps/*.py``/``agents/*.py`` node module.
+def _is_permitted_marker_path(
+    rel_path: PurePosixPath, permitted_dirs: tuple[str, ...] = DEFAULT_PERMITTED_DIRS
+) -> bool:
+    """True for a node module inside one of ``permitted_dirs``.
 
     Excludes each directory's own ``__init__.py`` (a literal file with
     no node id and no markers, per ``scaffold.py``'s
@@ -207,7 +217,7 @@ def _is_permitted_marker_path(rel_path: PurePosixPath) -> bool:
     """
     if rel_path.suffix != ".py" or rel_path.name == "__init__.py":
         return False
-    return rel_path.parent in (_STEPS_DIR, _AGENTS_DIR)
+    return str(rel_path.parent) in permitted_dirs
 
 
 def _iter_project_files(project_dir: Path) -> Iterator[Path]:
@@ -284,7 +294,9 @@ def _sha256_text(data: str) -> str:
     return _sha256_bytes(data.encode("utf-8"))
 
 
-def capture_baseline(project_dir: Path) -> ProjectBaseline:
+def capture_baseline(
+    project_dir: Path, permitted_dirs: tuple[str, ...] = DEFAULT_PERMITTED_DIRS
+) -> ProjectBaseline:
     """Snapshot ``project_dir`` at the end of Phase 2, for later
     comparison by :func:`check_boundary`.
 
@@ -293,6 +305,9 @@ def capture_baseline(project_dir: Path) -> ProjectBaseline:
             sync`, import, or fill run has touched it yet, beyond the
             golden-render subprocess ``scaffold.py`` itself invokes,
             whose ``__pycache__`` output is excluded).
+        permitted_dirs: Project-relative POSIX directories whose
+            marker-bearing modules are the editable tier. Defaults to the
+            pydantic-graph project's ``steps/`` and ``agents/``.
 
     Returns:
         The baseline snapshot: whole-file hashes for every forbidden
@@ -314,7 +329,7 @@ def capture_baseline(project_dir: Path) -> ProjectBaseline:
         rel_path = PurePosixPath(path.relative_to(resolved_root).as_posix())
         scaffolded_paths.add(str(rel_path))
 
-        if _is_permitted_marker_path(rel_path):
+        if _is_permitted_marker_path(rel_path, permitted_dirs):
             node_id = rel_path.stem
             text = path.read_text(encoding="utf-8")
             regions = _parse_regions(text, node_id)
@@ -332,6 +347,7 @@ def capture_baseline(project_dir: Path) -> ProjectBaseline:
         forbidden_hashes=forbidden_hashes,
         permitted_regions=permitted_regions,
         scaffolded_paths=frozenset(scaffolded_paths),
+        permitted_dirs=tuple(permitted_dirs),
     )
 
 
@@ -457,6 +473,7 @@ def check_boundary(project_dir: Path, baseline: ProjectBaseline) -> BoundaryChec
 
 
 __all__ = [
+    "DEFAULT_PERMITTED_DIRS",
     "BoundaryCheckResult",
     "BoundaryScaffoldError",
     "BoundaryViolationError",

@@ -6,11 +6,24 @@ import {
   CompileConflictError,
   ReviewUnavailableError,
 } from '../api/client';
-import type { CompileSnapshot, FindingOut, HealthResponse, ModelsResponse } from '../api/schema';
+import type {
+  CompileSnapshot,
+  FindingOut,
+  HealthResponse,
+  ModelsResponse,
+  StartCompileRequest,
+} from '../api/schema';
 import { hasUnseenEvents, isLiveCompileStatus, resumeCursor } from '../api/compileWire';
 import { compilePhaseRows } from '../state/compileState';
 
 const SESSION_KEY_PREFIX = 'swarm-builder:compile:';
+
+/** The two compile targets `POST /api/compile` accepts (`StartCompileRequest.target`). */
+type CompileTarget = NonNullable<StartCompileRequest['target']>;
+const TARGET_LABELS: Record<CompileTarget, string> = {
+  'pydantic-graph': 'PydanticAI (pydantic-graph)',
+  langgraph: 'PydanticAI + LangGraph export',
+};
 
 /** A graph has at most one live compile (409 otherwise), so one sessionStorage
  * slot per graph is the whole persistence this panel needs: the compileId to
@@ -70,6 +83,7 @@ export function CompilePanel() {
   const [modelOverrideProvider, setModelOverrideProvider] = useState('');
   const [modelOverrideModel, setModelOverrideModel] = useState('');
   const [exportInfo, setExportInfo] = useState<{ projectPath: string; runCommand: string } | null>(null);
+  const [target, setTarget] = useState<CompileTarget>('pydantic-graph');
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const prevSaveStatus = useRef(saveStatus);
@@ -255,7 +269,7 @@ export function CompilePanel() {
     // task scheduled, which is the server's `queued` status -- not `running`.
     setCompileState({ status: 'queued' });
     try {
-      const { compileId } = await api.startCompile(graph.id);
+      const { compileId } = await api.startCompile(graph.id, target);
       setCompileState({ compileId });
       sessionStorage.setItem(sessionKey(graph.id), JSON.stringify({ compileId }));
       subscribe(compileId);
@@ -337,7 +351,7 @@ export function CompilePanel() {
           </div>
         )}
         {models?.settingsError && <div className="sb-hint">settings.yaml error: {models.settingsError}</div>}
-        <div>
+        <div className="sb-field-row">
           <select value={modelOverrideProvider} onChange={(e) => setModelOverrideProvider(e.target.value)}>
             <option value="">(inherit default)</option>
             {models?.routes.map((route) => (
@@ -386,13 +400,38 @@ export function CompilePanel() {
           </div>
         )}
         {exportInfo && <div className="sb-hint">Recompiling regenerates the whole project; v1 does not merge prior edits.</div>}
-        <button
-          disabled={!compileReady || (review !== null && !review.ok) || compileInFlight}
-          onClick={handleCompile}
-        >
-          Compile
-        </button>
-        {compileInFlight && <button onClick={handleCancel}>Cancel</button>}
+        <fieldset className="sb-target-picker">
+          <legend>Target</legend>
+          {(Object.keys(TARGET_LABELS) as CompileTarget[]).map((option) => (
+            <label key={option}>
+              <input
+                type="radio"
+                name="compile-target"
+                value={option}
+                checked={target === option}
+                disabled={compileInFlight}
+                onChange={() => setTarget(option)}
+              />
+              {TARGET_LABELS[option]}
+            </label>
+          ))}
+          {target === 'langgraph' && (
+            <div className="sb-hint">
+              Runs the five phases, then converts the validated project into a LangGraph export
+              (four more phases, one extra model call) under <code>workspace/projects-langgraph/</code>.
+            </div>
+          )}
+        </fieldset>
+        <div className="sb-action-row">
+          <button
+            className="sb-btn-primary"
+            disabled={!compileReady || (review !== null && !review.ok) || compileInFlight}
+            onClick={handleCompile}
+          >
+            Compile
+          </button>
+          {compileInFlight && <button onClick={handleCancel}>Cancel</button>}
+        </div>
       </section>
 
       {compile.status !== 'idle' && (
@@ -431,12 +470,14 @@ export function CompilePanel() {
       {compile.result && (
         <section>
           <h4>Result</h4>
-          <div>
+          <div className="sb-result-row">
             Project path: <code>{compile.result.projectPath}</code>
           </div>
-          <div>
+          <div className="sb-result-row">
             <code>{compile.result.runCommand}</code>
-            <button type="button" onClick={handleCopyRunCommand}>Copy</button>
+            <button type="button" className="sb-btn-sm" onClick={handleCopyRunCommand}>
+              Copy
+            </button>
           </div>
           {compile.result.model && (
             <div className="sb-hint">
@@ -449,6 +490,36 @@ export function CompilePanel() {
             <div className="sb-hint">Filled nodes: {compile.result.filledNodeIds.join(', ')}</div>
           )}
           {compile.result.diagram && <pre className="sb-diagram">{compile.result.diagram}</pre>}
+          {compile.result.langgraph && (
+            <div className="sb-langgraph-result">
+              <h4>LangGraph export</h4>
+              <div className="sb-result-row">
+                Project path: <code>{compile.result.langgraph.projectPath}</code>
+              </div>
+              <div className="sb-result-row">
+                <code>{compile.result.langgraph.runCommand}</code>
+                <button
+                  type="button"
+                  className="sb-btn-sm"
+                  onClick={() => {
+                    const command = compile.result?.langgraph?.runCommand;
+                    if (command && navigator.clipboard) navigator.clipboard.writeText(command).catch(() => {});
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+              {compile.result.langgraph.convertedNodeIds.length > 0 && (
+                <div className="sb-hint">
+                  Converted nodes: {compile.result.langgraph.convertedNodeIds.join(', ')}
+                  {compile.result.langgraph.attempts > 1 ? ` — ${compile.result.langgraph.attempts} attempts` : ''}
+                </div>
+              )}
+              {compile.result.langgraph.diagram && (
+                <pre className="sb-diagram">{compile.result.langgraph.diagram}</pre>
+              )}
+            </div>
+          )}
         </section>
       )}
 

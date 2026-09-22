@@ -64,10 +64,26 @@ const PHASE_LABELS = {
   validate: 'Validate',
 } satisfies Record<CompilePhaseName, string>;
 
+/** The LangGraph target's four extra phases (`compile/langgraph`). They are
+ * not in `COMPILE_PHASE_NAMES` on purpose: a pydantic-graph compile never
+ * emits them, and the row list appends unknown slugs after the five, which is
+ * exactly their position (indices 6-9). */
+export const LANGGRAPH_PHASE_NAMES = ['lg_scaffold', 'lg_convert', 'lg_boundary', 'lg_validate'] as const;
+const LANGGRAPH_PHASE_LABELS: Record<(typeof LANGGRAPH_PHASE_NAMES)[number], string> = {
+  lg_scaffold: 'LangGraph scaffold',
+  lg_convert: 'LangGraph convert',
+  lg_boundary: 'LangGraph boundary check',
+  lg_validate: 'LangGraph validate',
+};
+
 /** A human label for a phase slug; an unknown slug (a future phase) is shown
  * as itself rather than dropped. */
 export function phaseLabel(name: string): string {
-  return isCompilePhaseName(name) ? PHASE_LABELS[name] : name;
+  if (isCompilePhaseName(name)) return PHASE_LABELS[name];
+  if ((LANGGRAPH_PHASE_NAMES as readonly string[]).includes(name)) {
+    return LANGGRAPH_PHASE_LABELS[name as (typeof LANGGRAPH_PHASE_NAMES)[number]];
+  }
+  return name;
 }
 
 const PHASE_STATUS_LABELS = {
@@ -246,6 +262,32 @@ export interface CompileResult {
   /** The route the compile actually spent, with its source -- so the panel can
    * show which model ran instead of leaving it to the log tail alone. */
   model: ResolvedDefaultOut | null;
+  /** Present only for a `target: "langgraph"` compile: the export produced by
+   * phases 6-9 (`compile/langgraph`). */
+  langgraph: LangGraphResult | null;
+}
+
+export interface LangGraphResult {
+  projectPath: string;
+  runCommand: string;
+  diagram: string | null;
+  convertedNodeIds: string[];
+  attempts: number;
+}
+
+function parseLangGraphResult(value: unknown): LangGraphResult | null {
+  const record = asRecord(value);
+  if (record === null) return null;
+  const projectPath = asString(record.projectPath);
+  const runCommand = asString(record.runCommand);
+  if (projectPath === null || runCommand === null) return null;
+  return {
+    projectPath,
+    runCommand,
+    diagram: asString(record.diagram),
+    convertedNodeIds: asStringArray(record.convertedNodeIds),
+    attempts: typeof record.attempts === 'number' ? record.attempts : 0,
+  };
 }
 
 function parseCompileResultModel(value: unknown): ResolvedDefaultOut | null {
@@ -271,6 +313,7 @@ export function parseCompileResult(data: unknown): CompileResult | null {
     filledNodeIds: asStringArray(record.filledNodeIds),
     attempts: typeof record.attempts === 'number' ? record.attempts : 0,
     model: parseCompileResultModel(record.model),
+    langgraph: parseLangGraphResult(record.langgraph),
   };
 }
 

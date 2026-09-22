@@ -33,6 +33,16 @@ import {
   mergeCompilePatch,
 } from './compileState';
 import { assignNodeId } from '../slug';
+import type { RunState } from './runState';
+import {
+  applyRunEvent,
+  applyRunSnapshot,
+  applyRunStreamError,
+  initialRunState,
+  mergeRunPatch,
+  runStateFromRecord,
+} from './runState';
+import type { RunRecord } from '../api/schema';
 
 // ---------------------------------------------------------------------------
 // Kind-appropriate default specs (GROUP6_PLAN.md review finding A11 --
@@ -111,6 +121,9 @@ export interface GraphStoreState {
   saveRetryCount: number;
 
   compile: CompileState;
+  /** The run sub-state (`state/runState.ts`): a job of kind `run` on the
+   * same transport as `compile`, tracing the workflow node by node. */
+  run: RunState;
 
   // ---- graph lifecycle ----
   // `loadGraph` accepts the wire-shaped `SwarmGraph` (from
@@ -160,6 +173,15 @@ export interface GraphStoreState {
    * server already declared terminal. */
   markCompileStreamError(message: string): void;
 
+  // ---- run ----
+  setRunState(patch: Partial<RunState>): void;
+  resetRunState(): void;
+  applyRunEvent(event: CompileSseEvent): void;
+  applyRunSnapshot(snapshot: CompileSnapshot): void;
+  markRunStreamError(message: string): void;
+  /** Replace the run view with a persisted record (browsing history). */
+  loadRunRecord(record: RunRecord): void;
+
   // ---- internal: called only by the autosave effect wired from App.tsx ----
   markSaving(): number; // returns the mutationRevision being saved
   applySaved(updatedAt: string, forRevision: number): void;
@@ -190,6 +212,7 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
   saveError: null,
   saveRetryCount: 0,
   compile: initialCompileState(),
+  run: initialRunState(),
 
   loadGraph(graph) {
     set({
@@ -204,6 +227,7 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
       saveError: null,
       saveRetryCount: 0,
       compile: initialCompileState(),
+      run: initialRunState(),
     });
   },
 
@@ -253,6 +277,7 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
       saveError: null,
       saveRetryCount: 0,
       compile: initialCompileState(),
+      run: initialRunState(),
     });
     return graph;
   },
@@ -648,6 +673,25 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
 
   markCompileStreamError(message) {
     set((state) => ({ compile: applyCompileStreamError(state.compile, message) }));
+  },
+
+  setRunState(patch) {
+    set((state) => ({ run: mergeRunPatch(state.run, patch) }));
+  },
+  resetRunState() {
+    set({ run: initialRunState() });
+  },
+  applyRunEvent(event) {
+    set((state) => ({ run: applyRunEvent(state.run, event) }));
+  },
+  applyRunSnapshot(snapshot) {
+    set((state) => ({ run: applyRunSnapshot(state.run, snapshot) }));
+  },
+  markRunStreamError(message) {
+    set((state) => ({ run: applyRunStreamError(state.run, message) }));
+  },
+  loadRunRecord(record) {
+    set({ run: runStateFromRecord(record) });
   },
 
   markSaving() {

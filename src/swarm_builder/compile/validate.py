@@ -499,7 +499,56 @@ def validate_project(
             that ran up to and including the failing one.
     """
     extras_result = check_pyproject_extras(project_dir, route=route, resolved_model=resolved_model)
+    return run_keyless_gate(
+        project_dir,
+        import_snippet=KEYLESS_IMPORT_SNIPPET,
+        extras_result=extras_result,
+        uv_cache_dir=uv_cache_dir,
+        uv_sync_timeout_s=uv_sync_timeout_s,
+        keyless_import_timeout_s=keyless_import_timeout_s,
+        dry_run_timeout_s=dry_run_timeout_s,
+    )
 
+
+def run_keyless_gate(
+    project_dir: Path,
+    *,
+    import_snippet: str,
+    extras_result: ExtrasCheckResult | None = None,
+    uv_cache_dir: Path | None = None,
+    uv_sync_timeout_s: float = UV_SYNC_TIMEOUT_S,
+    keyless_import_timeout_s: float = KEYLESS_IMPORT_TIMEOUT_S,
+    dry_run_timeout_s: float = DRY_RUN_TIMEOUT_S,
+) -> ValidationResult:
+    """Run the three-step keyless gate (``uv sync`` -> import -> dry run).
+
+    The framework-agnostic core of :func:`validate_project`: it knows
+    nothing about pydantic-ai extras, only that a project must sync,
+    import with every credential stripped, and pass its own
+    ``validate/dry_run.py``. The LangGraph target (``compile/langgraph``)
+    calls it with its own import snippet.
+
+    Args:
+        project_dir: The project to validate; never modified.
+        import_snippet: The ``python -c`` snippet proving a keyless import.
+        extras_result: A prior extras check to carry in the result, or
+            ``None`` for a project with no extras contract.
+        uv_cache_dir: Explicit ``UV_CACHE_DIR``; defaults to the env.
+        uv_sync_timeout_s: Wall-clock timeout for ``uv sync``.
+        keyless_import_timeout_s: Wall-clock timeout for the import step.
+        dry_run_timeout_s: Wall-clock timeout for the dry-run step.
+
+    Returns:
+        Every step's outcome. Only returned when all three succeeded.
+
+    Raises:
+        ValidationStepError: If a step exits non-zero or times out.
+    """
+    resolved_extras = (
+        extras_result
+        if extras_result is not None
+        else ExtrasCheckResult(required_extras=(), declared_extras=())
+    )
     resolved_cache_dir = uv_cache_dir if uv_cache_dir is not None else get_uv_cache_dir()
     env = _build_subprocess_env(resolved_cache_dir)
 
@@ -517,19 +566,19 @@ def validate_project(
         steps.append(outcome)
         if not outcome.ok:
             partial_result = ValidationResult(
-                project_dir=project_dir, extras=extras_result, steps=tuple(steps)
+                project_dir=project_dir, extras=resolved_extras, steps=tuple(steps)
             )
             raise ValidationStepError(partial_result, outcome)
 
     run_step(STEP_UV_SYNC, ["uv", "sync"], uv_sync_timeout_s)
     run_step(
         STEP_KEYLESS_IMPORT,
-        ["uv", "run", "python", "-c", KEYLESS_IMPORT_SNIPPET],
+        ["uv", "run", "python", "-c", import_snippet],
         keyless_import_timeout_s,
     )
     run_step(STEP_DRY_RUN, ["uv", "run", "python", "validate/dry_run.py"], dry_run_timeout_s)
 
-    return ValidationResult(project_dir=project_dir, extras=extras_result, steps=tuple(steps))
+    return ValidationResult(project_dir=project_dir, extras=resolved_extras, steps=tuple(steps))
 
 
 __all__ = [
@@ -550,5 +599,6 @@ __all__ = [
     "ValidationResult",
     "ValidationStepError",
     "check_pyproject_extras",
+    "run_keyless_gate",
     "validate_project",
 ]

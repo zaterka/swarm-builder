@@ -91,9 +91,7 @@ class ScaffoldResult:
     golden_render: str
 
 
-def scaffold(
-    graph: SwarmGraph, project_dir: Path, resolved_model: ResolvedModel
-) -> ScaffoldResult:
+def scaffold(graph: SwarmGraph, project_dir: Path, resolved_model: ResolvedModel) -> ScaffoldResult:
     """Write the whole generated-project tree for one graph document.
 
     Emission is fully deterministic: every byte comes from this module's
@@ -151,6 +149,7 @@ def scaffold(
             write(f"src/swarm_workflow/agents/{node.id}.py", _render_agent_factory(graph, node))
 
     write("validate/dry_run.py", _render_dry_run(graph, structure))
+    write("run/stream_run.py", _render_stream_run(graph, structure))
 
     golden_render = _capture_golden_render(project_dir)
     write("validate/golden_render.txt", golden_render)
@@ -422,9 +421,7 @@ def _docstring_body(intent: str) -> str:
     escaped = intent
     for character, replacement in _STEP_DOCSTRING_ESCAPES.items():
         escaped = escaped.replace(character, replacement)
-    return escaped.replace(
-        _STEP_DOCSTRING_ESCAPED_QUOTE, f"\\{_STEP_DOCSTRING_ESCAPED_QUOTE}"
-    )
+    return escaped.replace(_STEP_DOCSTRING_ESCAPED_QUOTE, f"\\{_STEP_DOCSTRING_ESCAPED_QUOTE}")
 
 
 def _render_step(graph: SwarmGraph, node: SwarmNode) -> str:
@@ -482,7 +479,21 @@ def _render_step(graph: SwarmGraph, node: SwarmNode) -> str:
     lines.append(f"    {body_marker_begin(node.id)}")
     if node.kind == "agent":
         lines.append("    agent = build_agent(ctx.deps.model)")
-        lines.append("    result = await agent.run(ctx.inputs)")
+        if node.reads:
+            # A node that declares `reads` expects the agent to see those
+            # state fields: without this the declaration is decorative and
+            # the agent answers "I don't have the ticket" (seen in a real
+            # run). The prompt stays `ctx.inputs` alone when nothing is read.
+            context_parts = ", ".join(
+                f'f"- {read_field}: {{ctx.state.{read_field}!r}}"' for read_field in node.reads
+            )
+            lines.append(
+                '    prompt = f"{ctx.inputs}\\n\\nContext from state:\\n" + "\\n".join(['
+                f"{context_parts}])"
+            )
+            lines.append("    result = await agent.run(prompt)")
+        else:
+            lines.append("    result = await agent.run(ctx.inputs)")
         for write_field in node.writes:
             lines.append(f"    ctx.state.{write_field} = result.output")
         lines.append("    return result.output")
@@ -509,10 +520,7 @@ def _render_agent_factory(graph: SwarmGraph, node: SwarmNode) -> str:
     """
     template_id = node.template or infer_template(node.intent).suggestion
     template_text = (
-        Path(__file__).resolve().parent.parent
-        / "templates"
-        / template_id
-        / "agent.py.tmpl"
+        Path(__file__).resolve().parent.parent / "templates" / template_id / "agent.py.tmpl"
     ).read_text()
 
     instructions_repr = repr(node.intent)
@@ -656,7 +664,7 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
             "",
             "",
             "class _KeylessTestModel(TestModel):",
-            "    \"\"\"TestModel subclass that declares no native-tool support, so an",
+            '    """TestModel subclass that declares no native-tool support, so an',
             "    optional native tool (e.g. a websearch template's",
             "    ``NativeTool(WebSearchTool(optional=True))``) is silently dropped",
             "    before TestModel's own unconditional native-tool rejection would",
@@ -664,7 +672,7 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
             "    ``TestModel()`` raises ``UserError: TestModel does not support",
             "    built-in tools`` for ANY native tool, optional or not -- this",
             "    subclass is what makes the keyless dry run work for every",
-            "    template, not just non-websearch ones.\"\"\"",
+            '    template, not just non-websearch ones."""',
             "",
             "    @classmethod",
             "    def supported_native_tools(cls):",
@@ -709,9 +717,14 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
             "    )",
         ]
     )
-    if exit_is_join and exit_node.join is not None and exit_node.join.reducer in (
-        "list_append",
-        "list_extend",
+    if (
+        exit_is_join
+        and exit_node.join is not None
+        and exit_node.join.reducer
+        in (
+            "list_append",
+            "list_extend",
+        )
     ):
         inbound = len(structure.structural_predecessors.get(exit_node.id, []))
         lines.append(
@@ -736,6 +749,236 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# run/stream_run.py
+# ---------------------------------------------------------------------------
+
+#: Key of the JSON input file Swarm Builder's run job passes the workflow
+#: input through, and the env var that swaps the real model for a keyless
+#: ``TestModel`` (so the runner itself can be exercised without
+#: credentials -- same trick as ``validate/dry_run.py``).
+STREAM_RUN_INPUT_KEY = "input"
+STREAM_RUN_TEST_MODEL_ENV_VAR = "SWARM_RUN_TEST_MODEL"
+
+#: Longest rendered value (inputs, outputs, state fields) one run event
+#: carries. Longer values are truncated with a marker; the run panel is a
+#: trace, not a data export.
+STREAM_RUN_MAX_VALUE_CHARS = 4000
+
+#: The tracer script body, with ``$step_ids_literal`` and the constants
+#: above substituted by :func:`_render_stream_run`. A ``string.Template``
+#: rather than an f-string so the script's own braces stay literal.
+_STREAM_RUN_TEMPLATE = Template(
+    '''"""Streaming tracer for the generated project (emitted by swarm_builder).
+
+Usage::
+
+    uv run python run/stream_run.py <input.json>
+
+``<input.json>`` holds ``{"$input_key": <value>}``. Every step
+start/finish/failure and the final result are printed as one JSON object
+per line on stdout, which Swarm Builder's Run panel streams to the canvas.
+Set ``$test_model_env=1`` to run against a keyless ``TestModel`` instead of
+the project's real model.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import dataclasses
+import functools
+import importlib
+import json
+import os
+import sys
+import time
+import traceback
+from pathlib import Path
+
+STEP_NODE_IDS = [$step_ids_literal]
+MAX_VALUE_CHARS = $max_value_chars
+
+
+def _render(value):
+    """A JSON-safe, bounded rendering of any value."""
+    try:
+        text = json.dumps(value)
+    except (TypeError, ValueError):
+        text = None
+    if text is not None and len(text) <= MAX_VALUE_CHARS:
+        return value
+    preview = text if text is not None else repr(value)
+    truncated = len(preview) > MAX_VALUE_CHARS
+    return {"__preview__": preview[:MAX_VALUE_CHARS], "__truncated__": truncated}
+
+
+def _emit(event: dict) -> None:
+    sys.stdout.write(json.dumps(event, default=repr) + "\\n")
+    sys.stdout.flush()
+
+
+def _state_dict(state) -> dict:
+    if dataclasses.is_dataclass(state):
+        return {f.name: _render(getattr(state, f.name)) for f in dataclasses.fields(state)}
+    return {"__preview__": repr(state)[:MAX_VALUE_CHARS], "__truncated__": False}
+
+
+def _elapsed_ms(started: float) -> int:
+    return int((time.monotonic() - started) * 1000)
+
+
+def _wrap(node_id: str, step):
+    @functools.wraps(step)
+    async def traced(ctx):
+        before = _state_dict(ctx.state)
+        started = time.monotonic()
+        _emit({"event": "node_started", "nodeId": node_id, "inputs": _render(ctx.inputs)})
+        try:
+            output = await step(ctx)
+        except BaseException as exc:
+            _emit(
+                {
+                    "event": "node_failed",
+                    "nodeId": node_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc()[-MAX_VALUE_CHARS:],
+                    "durationMs": _elapsed_ms(started),
+                }
+            )
+            raise
+        after = _state_dict(ctx.state)
+        delta = {key: after[key] for key in after if before.get(key) != after[key]}
+        _emit(
+            {
+                "event": "node_finished",
+                "nodeId": node_id,
+                "output": _render(output),
+                "stateDelta": delta,
+                "durationMs": _elapsed_ms(started),
+            }
+        )
+        return output
+
+    return traced
+
+
+def _describe_model(model) -> str:
+    if isinstance(model, str):
+        return model
+    name = getattr(model, "model_name", None)
+    return name if isinstance(name, str) else type(model).__name__
+
+
+async def main(argv: list[str]) -> int:
+    if len(argv) != 2:
+        _emit({"event": "run_failed", "error": "usage: stream_run.py <input.json>"})
+        return 2
+    payload = json.loads(Path(argv[1]).read_text())
+    inputs = payload["$input_key"]
+
+    # Wrap BEFORE importing graph.py: it binds each step by importing the
+    # name from its module, so the wrapper is what builder.step() sees.
+    for node_id in STEP_NODE_IDS:
+        module = importlib.import_module(f"swarm_workflow.steps.{node_id}")
+        setattr(module, node_id, _wrap(node_id, getattr(module, node_id)))
+
+    from swarm_workflow.deps import Deps
+    from swarm_workflow.graph import graph
+    from swarm_workflow.state import State
+
+    if os.environ.get("$test_model_env") == "1":
+        from pydantic_ai.models.test import TestModel
+
+        class _KeylessTestModel(TestModel):
+            @classmethod
+            def supported_native_tools(cls):
+                return frozenset()
+
+        deps = Deps(model=_KeylessTestModel())
+    else:
+        deps = Deps()
+
+    state = State()
+    started = time.monotonic()
+    _emit({"event": "run_started", "model": _describe_model(deps.model), "input": _render(inputs)})
+    try:
+        output = await graph.run(inputs=inputs, state=state, deps=deps)
+    except BaseException as exc:
+        _emit(
+            {
+                "event": "run_failed",
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc()[-MAX_VALUE_CHARS:],
+                "state": _state_dict(state),
+                "durationMs": _elapsed_ms(started),
+            }
+        )
+        return 1
+    _emit(
+        {
+            "event": "run_finished",
+            "output": _render(output),
+            "state": _state_dict(state),
+            "durationMs": _elapsed_ms(started),
+        }
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main(sys.argv)))
+'''
+)
+
+
+def _render_stream_run(graph: SwarmGraph, structure: GraphStructure) -> str:
+    """Render ``run/stream_run.py``, the generated project's own tracer.
+
+    The script is what Swarm Builder's *Run* feature executes in a
+    subprocess: it reads the workflow input from a JSON file named on the
+    command line, wraps every step function so that starting, finishing
+    and failing each emit one JSON line on stdout, runs the graph with the
+    project's real ``Deps`` (real model, real credentials from the
+    environment), and ends with a ``run_finished`` or ``run_failed`` line
+    carrying the output and the final ``State``.
+
+    Wrapping happens *before* ``swarm_workflow.graph`` is imported:
+    ``graph.py`` does ``from swarm_workflow.steps.<id> import <id>`` at
+    import time, so replacing the attribute on each step module first
+    makes ``builder.step(...)`` register the wrapper. ``functools.wraps``
+    keeps ``__wrapped__`` pointing at the real step, which is what lets
+    pydantic-graph's ``get_type_hints`` still resolve the step's
+    ``StepContext[State, Deps, ...]`` annotation against the step
+    module's globals rather than this script's (``typing.get_type_hints``
+    follows ``__wrapped__`` to find the globals it evaluates against).
+
+    Like ``dry_run.py`` this is scaffolded rather than static because the
+    step-node id list is document-specific. It lives outside the
+    marker-bearing ``steps/``/``agents/`` trees, so Phase 4 hashes it
+    whole and the fill agent can never alter what the tracer reports.
+
+    Args:
+        graph: The document being emitted.
+        structure: Its analysis, reused rather than recomputed.
+
+    Returns:
+        The complete ``stream_run.py`` source.
+    """
+    step_node_ids = sorted(
+        node.id
+        for node in graph.nodes
+        if node.kind in ("agent", "programmatic")
+        and node.id not in structure.delegate_only_node_ids
+    )
+    step_ids_literal = ", ".join(f'"{node_id}"' for node_id in step_node_ids)
+    return _STREAM_RUN_TEMPLATE.substitute(
+        step_ids_literal=step_ids_literal,
+        input_key=STREAM_RUN_INPUT_KEY,
+        test_model_env=STREAM_RUN_TEST_MODEL_ENV_VAR,
+        max_value_chars=STREAM_RUN_MAX_VALUE_CHARS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -778,4 +1021,9 @@ def _capture_golden_render(project_dir: Path) -> str:
     return result.stdout
 
 
-__all__ = ["ScaffoldResult", "scaffold"]
+__all__ = [
+    "STREAM_RUN_INPUT_KEY",
+    "STREAM_RUN_TEST_MODEL_ENV_VAR",
+    "ScaffoldResult",
+    "scaffold",
+]

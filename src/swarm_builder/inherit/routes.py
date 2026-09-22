@@ -493,9 +493,9 @@ def to_resolved_model(effective: EffectiveModel) -> ResolvedModel:
             "\n"
             f"DEFAULT_BASE_URL: str = {base_url_literal}\n"
             "\n"
-            f'_MODEL_ID = os.environ.get("SWARM_MODEL", DEFAULT_MODEL_ID)\n'
-            f'_BASE_URL = os.environ.get("SWARM_BASE_URL", DEFAULT_BASE_URL)\n'
-            f'_API_KEY_ENV = os.environ.get("SWARM_API_KEY_ENV", {api_key_env_default_literal})\n'
+            f'_MODEL_ID = os.environ.get("SWARM_MODEL") or DEFAULT_MODEL_ID\n'
+            f'_BASE_URL = os.environ.get("SWARM_BASE_URL") or DEFAULT_BASE_URL\n'
+            f'_API_KEY_ENV = os.environ.get("SWARM_API_KEY_ENV") or {api_key_env_default_literal}\n'
             "\n"
             "\n"
             "def _resolve_default_model() -> Model:\n"
@@ -531,13 +531,16 @@ def to_resolved_model(effective: EffectiveModel) -> ResolvedModel:
             ),
         )
 
+    # `or` rather than a `.get` default: a sourced `.env` with `SWARM_MODEL=`
+    # leaves the variable set to "" and the generated project must still fall
+    # back to its inherited default (found running a generated project for real).
     default_model_literal = repr(f"{emission.prefix}:{effective.model}")
     helper_source = (
         f"DEFAULT_MODEL: str = {default_model_literal}\n"
         "\n"
         "\n"
         "def _resolve_default_model() -> str:\n"
-        '    return os.environ.get("SWARM_MODEL", DEFAULT_MODEL)\n'
+        '    return os.environ.get("SWARM_MODEL") or DEFAULT_MODEL\n'
     )
     return ResolvedModel(
         helper_source=helper_source,

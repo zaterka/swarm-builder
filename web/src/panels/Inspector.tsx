@@ -12,6 +12,7 @@ import {
 import { api, TemplatesUnavailableError } from '../api/client';
 import type { TemplateEntryOut } from '../api/schema';
 import StateFieldsPanel from './StateFieldsPanel';
+import { formatRunValue } from '../api/runWire';
 
 /**
  * Per-node editor (PLAN.md "Frontend" -> "Inspector"). Shows the
@@ -28,6 +29,7 @@ export function Inspector() {
   const addDecisionBranch = useGraphStore((s) => s.addDecisionBranch);
   const removeDecisionBranch = useGraphStore((s) => s.removeDecisionBranch);
   const setDelegatesTo = useGraphStore((s) => s.setDelegatesTo);
+  const runNodes = useGraphStore((s) => s.run.nodes);
 
   const [showStateFields, setShowStateFields] = useState(false);
   const [templates, setTemplates] = useState<TemplateEntryOut[] | null>(null);
@@ -95,6 +97,8 @@ export function Inspector() {
         <div className="sb-node-id-hint">
           id: <code>{node.id}</code> (assigned once at creation; renaming the title never changes it)
         </div>
+
+        {runNodes[node.id] && <LastRunSection trace={runNodes[node.id]!} />}
 
         <div className="sb-entry-exit-controls">
           <label>
@@ -354,26 +358,31 @@ function ProgrammaticFields(props: {
     <>
       <fieldset>
         <legend>Needs (extra PyPI packages)</legend>
-        <ul>
+        <ul className="sb-item-list">
           {props.spec.needs.map((need) => (
             <li key={need}>
-              {need}{' '}
-              <button onClick={() => props.onChange({ needs: props.spec.needs.filter((n) => n !== need) })}>
+              <code>{need}</code>
+              <button
+                className="sb-btn-danger sb-btn-sm"
+                onClick={() => props.onChange({ needs: props.spec.needs.filter((n) => n !== need) })}
+              >
                 Remove
               </button>
             </li>
           ))}
         </ul>
-        <input value={newNeed} onChange={(e) => setNewNeed(e.target.value)} placeholder="package-name" />
-        <button
-          onClick={() => {
-            if (!newNeed.trim()) return;
-            props.onChange({ needs: [...props.spec.needs, newNeed.trim()] });
-            setNewNeed('');
-          }}
-        >
-          Add
-        </button>
+        <div className="sb-add-row">
+          <input value={newNeed} onChange={(e) => setNewNeed(e.target.value)} placeholder="package-name" />
+          <button
+            onClick={() => {
+              if (!newNeed.trim()) return;
+              props.onChange({ needs: [...props.spec.needs, newNeed.trim()] });
+              setNewNeed('');
+            }}
+          >
+            Add
+          </button>
+        </div>
       </fieldset>
       <label>
         Signature hint (free text — read by the fill agent, never executed)
@@ -409,31 +418,38 @@ function DecisionFields(props: {
 
       <fieldset>
         <legend>Branches</legend>
-        <ul>
+        <ul className="sb-item-list">
           {props.branches.map((b) => (
             <li key={b.match}>
-              <code>{b.match}</code> → {props.targetOptions.find((o) => o.id === b.targetNodeId)?.title ?? b.targetNodeId}{' '}
-              <button onClick={() => props.onRemoveBranch(b.match)}>Remove</button>
+              <span>
+                <code>{b.match}</code> →{' '}
+                {props.targetOptions.find((o) => o.id === b.targetNodeId)?.title ?? b.targetNodeId}
+              </span>
+              <button className="sb-btn-danger sb-btn-sm" onClick={() => props.onRemoveBranch(b.match)}>
+                Remove
+              </button>
             </li>
           ))}
         </ul>
-        <input value={newMatch} onChange={(e) => setNewMatch(e.target.value)} placeholder="match value" />
-        <select value={newTarget} onChange={(e) => setNewTarget(e.target.value)}>
-          {props.targetOptions.map((opt) => (
-            <option key={opt.id} value={opt.id}>
-              {opt.title}
-            </option>
-          ))}
-        </select>
-        <button
-          onClick={() => {
-            if (!newMatch.trim() || !newTarget) return;
-            props.onAddBranch(newMatch.trim(), newTarget);
-            setNewMatch('');
-          }}
-        >
-          Add branch
-        </button>
+        <div className="sb-add-row">
+          <input value={newMatch} onChange={(e) => setNewMatch(e.target.value)} placeholder="match value" />
+          <select value={newTarget} onChange={(e) => setNewTarget(e.target.value)}>
+            {props.targetOptions.map((opt) => (
+              <option key={opt.id} value={opt.id}>
+                {opt.title}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => {
+              if (!newMatch.trim() || !newTarget) return;
+              props.onAddBranch(newMatch.trim(), newTarget);
+              setNewMatch('');
+            }}
+          >
+            Add branch
+          </button>
+        </div>
       </fieldset>
 
       <label>
@@ -479,3 +495,40 @@ function JoinFields(props: {
 }
 
 export default Inspector;
+
+interface LastRunSectionProps {
+  trace: NonNullable<ReturnType<typeof useGraphStore.getState>['run']['nodes'][string]>;
+}
+
+/** What the last run recorded for the selected node (RunPanel's trace, per node). */
+function LastRunSection({ trace }: LastRunSectionProps) {
+  const status = trace.status === 'started' ? 'running' : trace.status;
+  return (
+    <details className="sb-last-run" open>
+      <summary>
+        Last run: <span className={`sb-run-${trace.status}`}>{status}</span>
+        {trace.durationMs !== null ? ` — ${trace.durationMs} ms` : ''}
+      </summary>
+      {trace.inputs !== undefined && (
+        <>
+          <div className="sb-hint">Inputs</div>
+          <pre className="sb-run-output">{formatRunValue(trace.inputs)}</pre>
+        </>
+      )}
+      {trace.output !== undefined && (
+        <>
+          <div className="sb-hint">Output</div>
+          <pre className="sb-run-output">{formatRunValue(trace.output)}</pre>
+        </>
+      )}
+      {trace.stateDelta && Object.keys(trace.stateDelta).length > 0 && (
+        <>
+          <div className="sb-hint">State written</div>
+          <pre className="sb-run-output">{formatRunValue(trace.stateDelta)}</pre>
+        </>
+      )}
+      {trace.error && <div className="sb-finding sb-finding-error">{trace.error}</div>}
+      {trace.traceback && <pre className="sb-run-output sb-run-traceback">{trace.traceback}</pre>}
+    </details>
+  );
+}

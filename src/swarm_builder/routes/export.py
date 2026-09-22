@@ -8,13 +8,20 @@ without any further instructions.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
 from swarm_builder.config import get_uv_cache_dir, get_workspace_dir
 from swarm_builder.store._ids import InvalidGraphIdError
-from swarm_builder.store.projects import project_dir, project_exists
+from swarm_builder.store.projects import (
+    langgraph_project_dir,
+    langgraph_project_exists,
+    project_dir,
+    project_exists,
+)
 
 router = APIRouter(tags=["export"])
 
@@ -35,10 +42,13 @@ class ExportResponse(_CamelModel):
 
     project_path: str
     run_command: str
+    target: Literal["pydantic-graph", "langgraph"] = "pydantic-graph"
 
 
 @router.get("/graphs/{graph_id}/export", response_model=ExportResponse)
-def export_graph(graph_id: str) -> ExportResponse:
+def export_graph(
+    graph_id: str, target: Literal["pydantic-graph", "langgraph"] = "pydantic-graph"
+) -> ExportResponse:
     """404 (naming the expected, never-created path) when the graph has
     no compiled project yet. This route does not itself validate that a
     GRAPH document with this id exists -- only that a PROJECT directory
@@ -50,16 +60,19 @@ def export_graph(graph_id: str) -> ExportResponse:
     workspace_dir = get_workspace_dir()
 
     try:
-        exists = project_exists(workspace_dir, graph_id)
+        if target == "langgraph":
+            exists = langgraph_project_exists(workspace_dir, graph_id)
+            path = langgraph_project_dir(workspace_dir, graph_id)
+        else:
+            exists = project_exists(workspace_dir, graph_id)
+            path = project_dir(workspace_dir, graph_id)
     except InvalidGraphIdError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    path = project_dir(workspace_dir, graph_id)
 
     if not exists:
         raise HTTPException(
             status_code=404,
-            detail=f"no compiled project for graph {graph_id!r} yet; expected at {path}",
+            detail=f"no compiled {target} project for graph {graph_id!r} yet; expected at {path}",
         )
 
     uv_cache_dir = get_uv_cache_dir()
@@ -68,4 +81,4 @@ def export_graph(graph_id: str) -> ExportResponse:
         f"UV_CACHE_DIR={uv_cache_dir} uv sync && "
         f"UV_CACHE_DIR={uv_cache_dir} uv run python validate/dry_run.py"
     )
-    return ExportResponse(project_path=str(path), run_command=run_command)
+    return ExportResponse(project_path=str(path), run_command=run_command, target=target)

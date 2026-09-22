@@ -660,6 +660,7 @@ def test_status_snapshot_shape_for_a_finished_job(
         assert set(body) == {
             "compileId",
             "graphId",
+            "kind",
             "status",
             "createdAt",
             "startedAt",

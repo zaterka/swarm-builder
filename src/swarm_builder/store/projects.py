@@ -166,3 +166,40 @@ def delete_project_dir(workspace_dir: Path, graph_id: str) -> None:
         shutil.rmtree(safe_path)
     except OSError as exc:
         raise ProjectStoreError(f"could not delete project directory {safe_path}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# LangGraph export directories: a sibling tree, never nested inside the
+# pydantic-graph project (a recompile clears that whole directory, and the
+# boundary check would report a nested export as unexpected files).
+# ---------------------------------------------------------------------------
+
+
+def langgraph_projects_dir(workspace_dir: Path) -> Path:
+    """Return ``<workspace_dir>/projects-langgraph``. Does not create it."""
+    return workspace_dir / "projects-langgraph"
+
+
+def langgraph_project_dir(workspace_dir: Path, graph_id: str) -> Path:
+    """Return ``<workspace_dir>/projects-langgraph/<graph_id>/`` (validated)."""
+    validate_graph_id(graph_id)
+    return resolve_within(langgraph_projects_dir(workspace_dir), graph_id)
+
+
+def langgraph_project_exists(workspace_dir: Path, graph_id: str) -> bool:
+    """Whether a LangGraph export directory exists for ``graph_id``."""
+    return langgraph_project_dir(workspace_dir, graph_id).is_dir()
+
+
+def delete_langgraph_project_dir(workspace_dir: Path, graph_id: str) -> None:
+    """Remove the LangGraph export directory; a no-op when absent."""
+    path = langgraph_project_dir(workspace_dir, graph_id)
+    if not path.exists():
+        return
+    safe_path = resolve_within(langgraph_projects_dir(workspace_dir), graph_id)
+    try:
+        shutil.rmtree(safe_path)
+    except OSError as exc:
+        raise ProjectStoreError(
+            f"could not delete LangGraph project directory {safe_path}: {exc}"
+        ) from exc

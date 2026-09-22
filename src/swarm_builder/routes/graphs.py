@@ -33,7 +33,11 @@ from swarm_builder.store.graphs import (
     list_graphs,
     put_graph,
 )
-from swarm_builder.store.projects import ProjectStoreError, delete_project_dir
+from swarm_builder.store.projects import (
+    ProjectStoreError,
+    delete_langgraph_project_dir,
+    delete_project_dir,
+)
 
 router = APIRouter(tags=["graphs"])
 
@@ -255,6 +259,7 @@ def delete_graph_route(
     if project:
         try:
             delete_project_dir(workspace_dir, graph_id)
+            delete_langgraph_project_dir(workspace_dir, graph_id)
         except InvalidGraphIdError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ProjectStoreError as exc:

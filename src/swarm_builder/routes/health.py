@@ -27,7 +27,11 @@ from swarm_builder.config import (
     get_uv_cache_dir,
     get_workspace_dir,
 )
-from swarm_builder.inherit.settings import read_settings, resolve_effective_model
+from swarm_builder.inherit.settings import (
+    EffectiveModel,
+    read_settings,
+    resolve_effective_model,
+)
 
 router = APIRouter(tags=["health"])
 
@@ -74,6 +78,12 @@ class HealthResponse(_CamelModel):
     web_dist_present: bool
     compile_ready: bool
     blockers: list[str]
+    #: Whether a *run* (executing the compiled workflow with real
+    #: credentials) is expected to work: every compile blocker, plus the
+    #: resolved route's credential being present in this server's
+    #: environment. ``run_blockers`` names each reason.
+    run_ready: bool
+    run_blockers: list[str]
 
 
 def _path_writable(path: Path) -> bool:
@@ -145,6 +155,11 @@ def get_health() -> HealthResponse:
     if settings_error is not None:
         blockers.append(f"settings.yaml could not be read: {settings_error}")
 
+    run_blockers = list(blockers)
+    missing_credential = credential_blocker(effective)
+    if missing_credential is not None:
+        run_blockers.append(missing_credential)
+
     return HealthResponse(
         version=__version__,
         dsh_home=str(dsh_home),
@@ -158,4 +173,67 @@ def get_health() -> HealthResponse:
         web_dist_present=web_dist_present,
         compile_ready=not blockers,
         blockers=blockers,
+        run_ready=not run_blockers,
+        run_blockers=run_blockers,
+    )
+
+
+#: Known-name model prefixes -> the env vars PydanticAI reads for them (any
+#: one present counts). Only consulted when the route names no explicit
+#: ``api_key_env``; a prefix absent here yields no blocker, because this
+#: check must never wrongly disable Run for a provider it does not know.
+_PROVIDER_CREDENTIAL_ENV_VARS: dict[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    "deepseek": ("DEEPSEEK_API_KEY",),
+    "groq": ("GROQ_API_KEY",),
+    "mistral": ("MISTRAL_API_KEY",),
+    "google-gla": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "google-vertex": ("GOOGLE_APPLICATION_CREDENTIALS",),
+    "bedrock": (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_PROFILE",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+    ),
+}
+
+
+def credential_blocker(effective: EffectiveModel) -> str | None:
+    """Name the missing credential for the resolved route, or ``None``.
+
+    A route with an explicit ``api_key_env`` needs exactly that variable.
+    A known-name route (``<prefix>:<id>``) needs one of PydanticAI's own
+    variables for that prefix. A bedrock-protocol route with an
+    ``aws_profile`` is treated as configured.
+    """
+    if effective.api_key_env:
+        if os.environ.get(effective.api_key_env):
+            return None
+        return (
+            f"Run disabled: the resolved route reads its API key from "
+            f"${effective.api_key_env}, which is not set in the server's environment."
+        )
+
+    route = effective.route
+    if route is not None and route.aws_profile:
+        return None
+
+    prefix: str | None = None
+    if route is not None and route.api:
+        prefix = route.api
+    elif ":" in effective.model:
+        prefix = effective.model.split(":", 1)[0]
+    else:
+        prefix = effective.provider
+
+    candidates = _PROVIDER_CREDENTIAL_ENV_VARS.get(prefix or "")
+    if not candidates:
+        return None
+    if any(os.environ.get(name) for name in candidates):
+        return None
+    return (
+        f"Run disabled: no credential for the {prefix!r} provider in the server's "
+        f"environment (set one of {', '.join(candidates)})."
     )

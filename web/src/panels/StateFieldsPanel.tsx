@@ -80,7 +80,9 @@ export function StateFieldsPanel() {
               value={field.default ?? ''}
               onChange={(e) => updateField(field.name, { default: e.target.value || null })}
             />
-            <button onClick={() => removeField(field.name)}>Remove</button>
+            <button className="sb-btn-danger sb-btn-sm" onClick={() => removeField(field.name)}>
+              Remove
+            </button>
           </li>
         ))}
       </ul>

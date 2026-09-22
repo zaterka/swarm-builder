@@ -90,6 +90,7 @@ describe('compile wire vocabulary', () => {
       filledNodeIds: ['intake', 'summarize'],
       attempts: 1,
       model: { provider: 'deepseek-official', model: 'deepseek-flash', source: 'settings-default' },
+      langgraph: null,
     });
     // A result a user cannot act on is not a result.
     expect(parseCompileResult({ diagram: 'stateDiagram-v2' })).toBeNull();
@@ -119,5 +120,31 @@ describe('resume decision', () => {
     // A cursor this build cannot read is treated as "subscribe anyway": the
     // cost of being wrong is an empty replay, never a missed event.
     expect(hasUnseenEvents(finished, 'opaque')).toBe(true);
+  });
+});
+
+
+describe('LangGraph target', () => {
+  it('parses the langgraph block of a done payload and labels its phases', () => {
+    const result = parseCompileResult({
+      ...compileDonePayloadFixture(),
+      langgraph: {
+        projectPath: '/ws/projects-langgraph/g',
+        runCommand: 'cd /ws/projects-langgraph/g && uv sync',
+        diagram: '---\nconfig:\n',
+        convertedNodeIds: ['fetch'],
+        attempts: 2,
+      },
+    });
+    expect(result?.langgraph).toEqual({
+      projectPath: '/ws/projects-langgraph/g',
+      runCommand: 'cd /ws/projects-langgraph/g && uv sync',
+      diagram: '---\nconfig:\n',
+      convertedNodeIds: ['fetch'],
+      attempts: 2,
+    });
+    expect(phaseLabel('lg_convert')).toBe('LangGraph convert');
+    expect(phaseLabel('lg_validate')).toBe('LangGraph validate');
+    expect(phaseLabel('something_else')).toBe('something_else');
   });
 });

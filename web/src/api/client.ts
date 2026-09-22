@@ -8,12 +8,18 @@ import type {
   CompileSnapshot,
   DeleteGraphResponse,
   ExportResponse,
+  GenerateGraphRequest,
+  GenerateGraphResponse,
   GraphListResponse,
   HealthResponse,
   ModelsResponse,
   ReviewResponse,
+  RunListResponse,
+  RunRecord,
   StartCompileRequest,
   StartCompileResponse,
+  StartRunRequest,
+  StartRunResponse,
   SwarmGraph,
   TemplateEntryOut,
   ValidationError,
@@ -158,9 +164,14 @@ async function reviewGraph(id: string): Promise<ReviewResponse> {
   }
 }
 
-async function exportGraph(id: string): Promise<ExportResponse> {
+async function exportGraph(
+  id: string,
+  target: 'pydantic-graph' | 'langgraph' = 'pydantic-graph',
+): Promise<ExportResponse> {
   try {
-    return await request<ExportResponse>(`/graphs/${encodeURIComponent(id)}/export`);
+    return await request<ExportResponse>(
+      `/graphs/${encodeURIComponent(id)}/export?target=${encodeURIComponent(target)}`,
+    );
   } catch (err) {
     if (err instanceof ApiError && err.status === 404) {
       throw new NotCompiledError(err.status, err.detail);
@@ -207,8 +218,11 @@ async function compileRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-function startCompile(graphId: string): Promise<StartCompileResponse> {
-  const payload: StartCompileRequest = { graphId };
+function startCompile(
+  graphId: string,
+  target: StartCompileRequest['target'] = 'pydantic-graph',
+): Promise<StartCompileResponse> {
+  const payload: StartCompileRequest = { graphId, target };
   return compileRequest<StartCompileResponse>('/compile', {
     method: 'POST',
     body: JSON.stringify(payload),
@@ -224,6 +238,52 @@ function getCompileSnapshot(compileId: string): Promise<CompileSnapshot> {
  * final state without a second request. */
 function cancelCompile(compileId: string): Promise<CompileSnapshot> {
   return compileRequest<CompileSnapshot>(`/compile/${encodeURIComponent(compileId)}`, {
+    method: 'DELETE',
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Describe -> generate (`routes/generate.py`). One structured-output model
+// call plus up to two repair rounds; a 422 carries `{message, problems}`.
+// ---------------------------------------------------------------------------
+
+function generateGraph(body: GenerateGraphRequest): Promise<GenerateGraphResponse> {
+  return request<GenerateGraphResponse>('/graphs/generate', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Runs (`routes/runs.py`). Starting and history are run-specific; the live
+// job (snapshot, cancel, events) is served by the generic `/api/jobs/:id`
+// endpoints, which are the compile endpoints under a kind-neutral path.
+// ---------------------------------------------------------------------------
+
+function startRun(graphId: string, input: unknown, compileIfStale = true): Promise<StartRunResponse> {
+  const payload: StartRunRequest = { input, compileIfStale };
+  return compileRequest<StartRunResponse>(`/graphs/${encodeURIComponent(graphId)}/runs`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+function listRuns(graphId: string): Promise<RunListResponse> {
+  return request<RunListResponse>(`/graphs/${encodeURIComponent(graphId)}/runs`);
+}
+
+function getRun(graphId: string, runId: string): Promise<RunRecord> {
+  return request<RunRecord>(
+    `/graphs/${encodeURIComponent(graphId)}/runs/${encodeURIComponent(runId)}`,
+  );
+}
+
+function getJobSnapshot(jobId: string): Promise<CompileSnapshot> {
+  return compileRequest<CompileSnapshot>(`/jobs/${encodeURIComponent(jobId)}`);
+}
+
+function cancelJob(jobId: string): Promise<CompileSnapshot> {
+  return compileRequest<CompileSnapshot>(`/jobs/${encodeURIComponent(jobId)}`, {
     method: 'DELETE',
   });
 }
@@ -331,6 +391,19 @@ export function subscribeCompileEvents(
   compileId: string,
   opts: SubscribeCompileEventsOptions,
 ): () => void {
+  return subscribeJobEventsAt('/compile', compileId, opts);
+}
+
+/** The same subscription against `/api/jobs/:id/events`, for run jobs. */
+export function subscribeJobEvents(jobId: string, opts: SubscribeCompileEventsOptions): () => void {
+  return subscribeJobEventsAt('/jobs', jobId, opts);
+}
+
+function subscribeJobEventsAt(
+  basePath: '/compile' | '/jobs',
+  compileId: string,
+  opts: SubscribeCompileEventsOptions,
+): () => void {
   let closed = false;
   let abortController: AbortController | null = null;
   let lastEventId = opts.lastEventId;
@@ -350,7 +423,7 @@ export function subscribeCompileEvents(
     let response: Response;
     try {
       response = await fetch(
-        `${API_BASE}/compile/${encodeURIComponent(compileId)}/events`,
+        `${API_BASE}${basePath}/${encodeURIComponent(compileId)}/events`,
         { headers, signal: abortController.signal },
       );
     } catch (err) {
@@ -481,4 +554,11 @@ export const api = {
   getCompileSnapshot,
   cancelCompile,
   subscribeCompileEvents,
+  generateGraph,
+  startRun,
+  listRuns,
+  getRun,
+  getJobSnapshot,
+  cancelJob,
+  subscribeJobEvents,
 };

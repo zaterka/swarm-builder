@@ -1,0 +1,393 @@
+/* Design tokens + element-level defaults for the app chrome.
+   Purely presentational: nothing here is keyed off graph semantics, and
+   no rule changes layout structure produced by the components.
+
+   The palette is a warm neutral one so the chrome sits next to the
+   canvas's paper background (`canvas/theme.css`) without either looking
+   pasted on. Accent is the same blue the agent node already uses,
+   darkened to clear 4.5:1 against white. */
+
+:root {
+  color-scheme: light;
+
+  /* Surfaces, borders, text */
+  --sb-bg: #f4f2ed;
+  --sb-surface: #ffffff;
+  --sb-surface-2: #faf9f6;
+  --sb-surface-3: #f1efe9;
+  --sb-border: #e4e0d8;
+  --sb-border-strong: #d1ccc1;
+  --sb-text: #24262a;
+  --sb-text-muted: #5c626c;
+  --sb-text-subtle: #767d88;
+
+  /* Accent */
+  --sb-accent: #2b6098;
+  --sb-accent-hover: #234f7d;
+  --sb-accent-soft: #eef4fa;
+  --sb-accent-border: #c2d6ea;
+  --sb-focus-ring: rgba(43, 96, 152, 0.35);
+
+  /* Semantic */
+  --sb-danger: #a52a2f;
+  --sb-danger-soft: #fdf1f0;
+  --sb-danger-border: #ecc7c5;
+  --sb-warn: #8a5a08;
+  --sb-warn-soft: #fdf6e7;
+  --sb-warn-border: #ead9ad;
+  --sb-success: #1c6b3a;
+  --sb-success-soft: #eef7f1;
+
+  /* Radii */
+  --sb-r-sm: 5px;
+  --sb-r: 7px;
+  --sb-r-lg: 11px;
+
+  /* Elevation — two levels only, both soft and warm-tinted */
+  --sb-shadow-sm: 0 1px 2px rgba(35, 30, 22, 0.06), 0 1px 1px rgba(35, 30, 22, 0.04);
+  --sb-shadow-md: 0 1px 2px rgba(35, 30, 22, 0.05), 0 10px 24px -10px rgba(35, 30, 22, 0.18);
+
+  /* Type */
+  --sb-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
+  --sb-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono',
+    monospace;
+
+  --sb-control-h: 30px;
+  --sb-transition: 120ms ease;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--sb-bg);
+  color: var(--sb-text);
+  font-family: var(--sb-font);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background: var(--sb-accent-soft);
+}
+
+/* Headings: a tight scale. h4 is the recurring "section label" in the
+   compile panel, so it reads as an eyebrow rather than a heading. */
+h2,
+h3,
+h4 {
+  margin: 0 0 8px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--sb-text);
+}
+h2 {
+  font-size: 21px;
+  letter-spacing: -0.02em;
+}
+h3 {
+  font-size: 14px;
+}
+h4 {
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--sb-text-subtle);
+}
+
+p {
+  margin: 0 0 8px;
+}
+
+code {
+  font-family: var(--sb-font-mono);
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--sb-surface-3);
+  color: #3c4148;
+}
+
+pre {
+  font-family: var(--sb-font-mono);
+  margin: 0;
+}
+
+/* ---------- Buttons ---------- */
+
+button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: var(--sb-control-h);
+  padding: 0 11px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--sb-text);
+  background: var(--sb-surface);
+  border: 1px solid var(--sb-border-strong);
+  border-radius: var(--sb-r);
+  box-shadow: var(--sb-shadow-sm);
+  cursor: pointer;
+  transition: background var(--sb-transition), border-color var(--sb-transition),
+    color var(--sb-transition), box-shadow var(--sb-transition);
+}
+
+button:hover:not(:disabled) {
+  background: var(--sb-surface-2);
+  border-color: #bdb7aa;
+}
+
+button:active:not(:disabled) {
+  background: var(--sb-surface-3);
+  box-shadow: none;
+}
+
+button:disabled {
+  color: var(--sb-text-subtle);
+  background: var(--sb-surface-2);
+  border-color: var(--sb-border);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+:where(button, input, select, textarea, [role='button'], [tabindex]):focus-visible {
+  outline: 2px solid var(--sb-accent);
+  outline-offset: 1px;
+}
+
+.sb-btn-primary {
+  color: #fff;
+  background: var(--sb-accent);
+  border-color: var(--sb-accent);
+}
+.sb-btn-primary:hover:not(:disabled) {
+  color: #fff;
+  background: var(--sb-accent-hover);
+  border-color: var(--sb-accent-hover);
+}
+.sb-btn-primary:active:not(:disabled) {
+  background: #1e4568;
+}
+/* A disabled primary drops its fill rather than fading the white label,
+   which would leave text at ~2:1 against the accent. */
+.sb-btn-primary:disabled {
+  color: var(--sb-text-subtle);
+  background: var(--sb-surface-2);
+  border-color: var(--sb-border);
+}
+
+/* Destructive actions stay quiet until hovered — a list of graphs
+   shouldn't read as a wall of red. */
+.sb-btn-danger:hover:not(:disabled) {
+  color: var(--sb-danger);
+  background: var(--sb-danger-soft);
+  border-color: var(--sb-danger-border);
+}
+
+.sb-btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--sb-text-muted);
+}
+.sb-btn-ghost:hover:not(:disabled) {
+  background: var(--sb-surface-3);
+  border-color: transparent;
+  color: var(--sb-text);
+}
+
+.sb-btn-sm {
+  min-height: 25px;
+  padding: 0 8px;
+  font-size: 11.5px;
+}
+
+.sb-btn-lg {
+  min-height: 36px;
+  padding: 0 18px;
+  font-size: 13.5px;
+  border-radius: 8px;
+}
+
+/* ---------- Inputs ---------- */
+
+input,
+select,
+textarea {
+  font: inherit;
+  font-size: 13px;
+  color: var(--sb-text);
+  background-color: var(--sb-surface);
+  border: 1px solid var(--sb-border-strong);
+  border-radius: var(--sb-r);
+  padding: 0 9px;
+  min-height: var(--sb-control-h);
+  width: 100%;
+  min-width: 0;
+  transition: border-color var(--sb-transition), box-shadow var(--sb-transition);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #a5a39c;
+}
+
+input:hover:not(:disabled),
+select:hover:not(:disabled),
+textarea:hover:not(:disabled) {
+  border-color: #bdb7aa;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--sb-accent);
+  box-shadow: 0 0 0 3px var(--sb-focus-ring);
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: none;
+}
+
+/* background-COLOR, not the shorthand: a select carries its chevron as a
+   background-image, which the shorthand would drop. */
+input:disabled,
+select:disabled,
+textarea:disabled {
+  color: var(--sb-text-subtle);
+  background-color: var(--sb-surface-2);
+  cursor: not-allowed;
+}
+
+textarea {
+  padding: 7px 9px;
+  min-height: 68px;
+  line-height: 1.55;
+  resize: vertical;
+}
+
+/* Native chevron replaced with one that matches the border colour; the
+   control itself stays a real <select> so keyboard/mobile behaviour is
+   whatever the platform does best. */
+select {
+  appearance: none;
+  padding-right: 28px;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%235c626c' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  cursor: pointer;
+}
+
+/* Left as a native control and merely tinted: a hand-rolled checkbox
+   buys nothing here and loses platform behaviour. */
+input[type='checkbox'] {
+  appearance: auto;
+  accent-color: var(--sb-accent);
+  width: 14px;
+  height: 14px;
+  min-height: 0;
+  margin: 0 7px 0 0;
+  padding: 0;
+  border: none;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+/* A label that wraps a caption plus its control becomes the caption; a
+   label that wraps a checkbox stays a single inline row. Several
+   checkbox labels in the Inspector carry an inline `display: block`,
+   which neutralises the flex column on its own — the :has() rule below
+   covers the rest. */
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 12px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--sb-text-muted);
+}
+
+label:has(> input[type='checkbox']) {
+  flex-direction: row;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--sb-text);
+  cursor: pointer;
+}
+
+fieldset {
+  margin: 0 0 12px;
+  padding: 10px 12px 12px;
+  background: var(--sb-surface-2);
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-r-lg);
+}
+
+legend {
+  padding: 0 5px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--sb-text-subtle);
+}
+
+fieldset > label:last-child {
+  margin-bottom: 0;
+}
+
+/* ---------- Scrollbars ---------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #cdc8bd transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d3cec4;
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #bbb5a8;
+  background-clip: content-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition-duration: 0.01ms !important;
+  }
+}

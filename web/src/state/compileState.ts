@@ -134,15 +134,19 @@ function appendLog(state: CompileState, line: string): CompileState {
   return { ...state, logLines: [...state.logLines, line].slice(-MAX_LOG_LINES) };
 }
 
-function applyPhaseEvent(state: CompileState, data: unknown): CompileState {
+/**
+ * Fold one `phase` payload into a phase list. Exported because a run job's
+ * compile-if-stale streams the same `phase` frames (`state/runState.ts`).
+ */
+export function foldPhaseEvent(phases: CompilePhase[], data: unknown): CompilePhase[] {
   const payload = readPhasePayload(data);
-  if (payload === null) return state;
+  if (payload === null) return phases;
 
-  const existing = state.phases.find((phase) => phase.name === payload.name);
+  const existing = phases.find((phase) => phase.name === payload.name);
   if (existing === undefined) {
     // First sighting of this phase. A phase streamed for the first time during
     // a replay arrives here exactly like a live one.
-    return { ...state, phases: [...state.phases, { name: payload.name, status: payload.status, attempt: 1 }] };
+    return [...phases, { name: payload.name, status: payload.status, attempt: 1 }];
   }
 
   // A repeated `started` for a phase that already exists is a *retry*, not a
@@ -150,10 +154,11 @@ function applyPhaseEvent(state: CompileState, data: unknown): CompileState {
   // it is running again.
   const attempt = payload.status === 'started' ? existing.attempt + 1 : existing.attempt;
   const updated: CompilePhase = { name: payload.name, status: payload.status, attempt };
-  return {
-    ...state,
-    phases: state.phases.map((phase) => (phase.name === payload.name ? updated : phase)),
-  };
+  return phases.map((phase) => (phase.name === payload.name ? updated : phase));
+}
+
+function applyPhaseEvent(state: CompileState, data: unknown): CompileState {
+  return { ...state, phases: foldPhaseEvent(state.phases, data) };
 }
 
 function applyWarningEvent(state: CompileState, data: unknown): CompileState {

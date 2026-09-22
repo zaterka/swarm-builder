@@ -182,6 +182,7 @@ export function compileRunningSnapshotFixture(overrides: Partial<CompileSnapshot
   return {
     compileId: FIXTURE_COMPILE_ID,
     graphId: 'fixture-review-clean',
+    kind: 'compile',
     status: 'running',
     createdAt: '2026-09-16T23:36:50.614212+00:00',
     startedAt: '2026-09-16T23:36:50.626227+00:00',
@@ -198,6 +199,7 @@ export function compileSucceededSnapshotFixture(overrides: Partial<CompileSnapsh
   return {
     compileId: FIXTURE_COMPILE_ID,
     graphId: 'fixture-review-clean',
+    kind: 'compile',
     status: 'succeeded',
     createdAt: '2026-09-16T23:36:50.614212+00:00',
     startedAt: '2026-09-16T23:36:50.626227+00:00',

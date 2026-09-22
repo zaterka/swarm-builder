@@ -61,6 +61,12 @@ from swarm_builder.compile.boundary import (
 )
 from swarm_builder.compile.fake_fill import apply_fake_fill
 from swarm_builder.compile.jobs import FILL_TIMEOUT_SECONDS, Job, JobRegistry
+from swarm_builder.compile.langgraph import (
+    COMPILE_TARGETS,
+    LANGGRAPH_PHASE_NAMES,
+    TARGET_LANGGRAPH,
+    TARGET_PYDANTIC_GRAPH,
+)
 from swarm_builder.compile.review import Finding, review
 from swarm_builder.compile.scaffold import ScaffoldResult, scaffold
 from swarm_builder.compile.validate import ValidationResult, validate_project
@@ -96,7 +102,14 @@ PHASE_NAMES: tuple[str, ...] = (
     PHASE_VALIDATE,
 )
 
-PHASE_INDEX: dict[str, int] = {name: position for position, name in enumerate(PHASE_NAMES, start=1)}
+#: The LangGraph target's four extra phases follow the five standard ones,
+#: so their 1-based ``index`` continues the numbering and a client renders
+#: them after ``validate``.
+ALL_PHASE_NAMES: tuple[str, ...] = (*PHASE_NAMES, *LANGGRAPH_PHASE_NAMES)
+
+PHASE_INDEX: dict[str, int] = {
+    name: position for position, name in enumerate(ALL_PHASE_NAMES, start=1)
+}
 
 #: ``phase`` event ``status`` values. A phase emits exactly one
 #: ``started`` and then either one ``succeeded`` or one ``failed`` --
@@ -250,6 +263,8 @@ class CompileOutcome:
     filled_node_ids: tuple[str, ...]
     attempts: int
     model: EffectiveModel
+    #: Present only for ``target="langgraph"``: phases 6-9's result.
+    langgraph: object | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +315,16 @@ class _AttemptState:
 # ---------------------------------------------------------------------------
 
 
+def _phase_total(job: Job) -> int:
+    """How many phases this job runs: five, or nine for a LangGraph compile.
+
+    Read off the job (``routes/compile.py`` records the target there) so
+    every phase frame of one compile reports the same ``total``.
+    """
+    target = getattr(job, "target", TARGET_PYDANTIC_GRAPH)
+    return len(ALL_PHASE_NAMES) if target == TARGET_LANGGRAPH else len(PHASE_NAMES)
+
+
 def _emit_phase_started(job: Job, phase: str) -> None:
     """Emit the ``started`` phase event for ``phase``."""
     job.append_event(
@@ -307,7 +332,7 @@ def _emit_phase_started(job: Job, phase: str) -> None:
         {
             "name": phase,
             "index": PHASE_INDEX[phase],
-            "total": len(PHASE_NAMES),
+            "total": _phase_total(job),
             "status": PHASE_STATUS_STARTED,
         },
     )
@@ -326,7 +351,7 @@ def _emit_phase_succeeded(job: Job, phase: str, details: dict[str, object] | Non
     payload: dict[str, object] = {
         "name": phase,
         "index": PHASE_INDEX[phase],
-        "total": len(PHASE_NAMES),
+        "total": _phase_total(job),
         "status": PHASE_STATUS_SUCCEEDED,
     }
     if details:
@@ -341,7 +366,7 @@ def _emit_phase_failed(job: Job, failure: _PhaseFailure) -> None:
         {
             "name": failure.phase,
             "index": PHASE_INDEX[failure.phase],
-            "total": len(PHASE_NAMES),
+            "total": _phase_total(job),
             "status": PHASE_STATUS_FAILED,
             "message": failure.message,
             "details": failure.details,
@@ -435,7 +460,7 @@ def _outcome_payload(outcome: CompileOutcome) -> dict[str, object]:
     Returns:
         The payload dict.
     """
-    return {
+    payload: dict[str, object] = {
         "projectPath": str(outcome.project_dir),
         "runCommand": outcome.run_command,
         "diagram": outcome.diagram,
@@ -447,6 +472,16 @@ def _outcome_payload(outcome: CompileOutcome) -> dict[str, object]:
             "source": outcome.model.source,
         },
     }
+    lg = outcome.langgraph
+    if lg is not None:
+        payload["langgraph"] = {
+            "projectPath": str(lg.project_dir),
+            "runCommand": lg.run_command,
+            "diagram": lg.diagram,
+            "convertedNodeIds": list(lg.converted_node_ids),
+            "attempts": lg.attempts,
+        }
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1058,6 +1093,58 @@ async def _run_fill_boundary_validate(
 
 
 # ---------------------------------------------------------------------------
+# The LangGraph target (phases 6-9), adapted to this module's emitters
+# ---------------------------------------------------------------------------
+
+
+async def _run_langgraph_target(
+    job: Job,
+    *,
+    graph: SwarmGraph,
+    source_project_dir: Path,
+    project_dir: Path,
+    effective: EffectiveModel,
+    uv_cache_dir: Path,
+    converter: object | None,
+) -> object:
+    """Run ``compile/langgraph``'s phases, translating its refusal into a
+    :class:`PhaseFailureError` so the terminal handling below is shared."""
+    # Imported here: compile/langgraph imports this module's FillResult, so a
+    # module-level import would be circular.
+    from swarm_builder.compile.langgraph.pipeline import (
+        LangGraphPhaseError,
+        _Emitters,
+        run_langgraph_phases,
+    )
+
+    def failed(job_: Job, phase: str, message: str, details: dict[str, object]) -> None:
+        _emit_phase_failed(job_, _PhaseFailure(phase=phase, message=message, details=details))
+
+    emitters = _Emitters(
+        started=_emit_phase_started,
+        succeeded=_emit_phase_succeeded,
+        failed=failed,
+        log=_emit_log,
+    )
+    try:
+        return await run_langgraph_phases(
+            job,
+            graph=graph,
+            source_project_dir=source_project_dir,
+            project_dir=project_dir,
+            effective=effective,
+            use_fake=_fake_fill_enabled(),
+            uv_cache_dir=uv_cache_dir,
+            emitters=emitters,
+            converter=converter,  # type: ignore[arg-type]
+        )
+    except LangGraphPhaseError as exc:
+        raise PhaseFailureError(
+            _PhaseFailure(phase=exc.phase, message=str(exc), details=exc.details)
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # The orchestrator
 # ---------------------------------------------------------------------------
 
@@ -1071,6 +1158,10 @@ async def run_compile(
     dsh_home: Path,
     filler: Filler | None = None,
     uv_cache_dir: Path | None = None,
+    finalize: bool = True,
+    target: str = TARGET_PYDANTIC_GRAPH,
+    langgraph_project_dir: Path | None = None,
+    langgraph_converter: object | None = None,
 ) -> CompileOutcome:
     """Run the five-phase compile for ``graph``, streaming progress into
     the job registered under ``compile_id``.
@@ -1095,6 +1186,19 @@ async def run_compile(
             for the reported run command. Defaults to
             :func:`swarm_builder.config.get_uv_cache_dir`, read at call
             time (never cached -- the environment is hot-reloadable).
+        finalize: When ``True`` (the default, and the plain-compile
+            path) a successful compile emits the terminal ``done`` event
+            and marks the job ``succeeded``. ``compile/run.py`` passes
+            ``False`` so a compile-then-run job stays live after the
+            compile: the run that follows owns the terminal event.
+            Failure and cancellation paths are unaffected -- a compile
+            that refuses still ends the job, whatever follows it.
+        target: ``"pydantic-graph"`` (the five phases) or ``"langgraph"``
+            (the five phases, then ``compile/langgraph``'s four: the
+            validated project is converted into a LangGraph export).
+        langgraph_project_dir: Where the LangGraph export is written;
+            required when ``target="langgraph"``.
+        langgraph_converter: Test seam for phase 7 (replaces the agent).
 
     Returns:
         The :class:`CompileOutcome` describing the finished compile --
@@ -1107,8 +1211,15 @@ async def run_compile(
         asyncio.CancelledError: Re-raised unchanged when the job is
             cancelled; the job is marked ``cancelled`` first.
     """
+    if target not in COMPILE_TARGETS:
+        raise ValueError(f"unknown compile target {target!r}; expected one of {COMPILE_TARGETS}")
+    if target == TARGET_LANGGRAPH and langgraph_project_dir is None:
+        raise ValueError("target='langgraph' requires langgraph_project_dir")
+
     job = registry.get(compile_id)
-    job.mark_running()
+    job.target = target  # type: ignore[attr-defined]
+    if job.status == "queued":
+        job.mark_running()
 
     resolved_uv_cache_dir = uv_cache_dir if uv_cache_dir is not None else get_uv_cache_dir()
 
@@ -1130,6 +1241,19 @@ async def run_compile(
             uv_cache_dir=resolved_uv_cache_dir,
         )
 
+        langgraph_outcome = None
+        if target == TARGET_LANGGRAPH:
+            assert langgraph_project_dir is not None
+            langgraph_outcome = await _run_langgraph_target(
+                job,
+                graph=graph,
+                source_project_dir=project_dir,
+                project_dir=langgraph_project_dir,
+                effective=effective,
+                uv_cache_dir=resolved_uv_cache_dir,
+                converter=langgraph_converter,
+            )
+
         outcome = CompileOutcome(
             project_dir=project_dir,
             run_command=_run_command(project_dir, resolved_uv_cache_dir),
@@ -1137,9 +1261,13 @@ async def run_compile(
             filled_node_ids=filled_node_ids,
             attempts=attempts,
             model=effective,
+            langgraph=langgraph_outcome,
         )
-        _emit_done(job, outcome, validation_result)
-        registry.mark_succeeded(compile_id, _outcome_payload(outcome))
+        if finalize:
+            _emit_done(job, outcome, validation_result)
+            registry.mark_succeeded(compile_id, _outcome_payload(outcome))
+        else:
+            _emit_log(job, "compile finished; project is up to date")
         return outcome
     except asyncio.CancelledError:
         # Cancellation is not a compile failure. Re-raise it unchanged --
@@ -1179,6 +1307,7 @@ def _emit_done(job: Job, outcome: CompileOutcome, validation_result: ValidationR
 
 
 __all__ = [
+    "ALL_PHASE_NAMES",
     "ERROR_CODE_PHASE_FAILED",
     "FAKE_FILL_ENABLED_VALUE",
     "FAKE_FILL_ENV_VAR",
