@@ -153,7 +153,7 @@ keys. Details: [architecture](docs/architecture.md).
 | [`docs/guide.md`](docs/guide.md) | The full manual: model configuration, every compile phase, Run, Describe, the LangGraph target, guarantees, troubleshooting |
 | [`docs/api.md`](docs/api.md) | The HTTP API and the SSE stream contract |
 | [`docs/architecture.md`](docs/architecture.md) | How the pieces fit, and why |
-| [`PLAN.md`](PLAN.md) · [`PLAN-V2-FEATURES.md`](PLAN-V2-FEATURES.md) | Design records: probe facts, rejected alternatives, acceptance criteria |
+| `PLAN.md` · `PLAN-V2-FEATURES.md` | Design records kept locally beside the checkout, not tracked in this repository: probe facts, rejected alternatives, acceptance criteria |
 
 ## Contributing
 

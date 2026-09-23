@@ -2,7 +2,7 @@
 
 How the pieces fit. This is the contributor-facing companion to
 [`guide.md`](./guide.md) (user-facing) and
-[`api.md`](./api.md) (the HTTP contract). [`../PLAN.md`](../PLAN.md) is the
+[`api.md`](./api.md) (the HTTP contract). The local `PLAN.md` is the
 design record — the probe facts, the rejected alternatives, and the
 reasoning behind every decision here. This file explains the *shape of the
 system as built*, and points at the code that owns each piece.
@@ -703,7 +703,7 @@ not a degraded mode.
 harness-session auditing of compiles, or reusing harness tools inside the
 fill loop — `compile/agent.py` is a small enough surface to sit behind an
 interface with a harness-backed implementation added then.
-[`../PLAN.md`](../PLAN.md)'s retained probe facts exist so that decision can
+The local `PLAN.md`'s retained probe facts exist so that decision can
 be revisited with evidence rather than re-probed from scratch.
 
 ## Running a workflow and generating a graph

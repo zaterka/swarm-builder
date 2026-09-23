@@ -6,10 +6,10 @@ under `/api`; everything else is the built frontend served from `web/dist`.
 
 This document is written to be sufficient to implement a client against —
 the SSE framing and reconnect contract in particular is specified down to
-the byte. For the *why* behind these shapes see
-[`../PLAN.md`](../PLAN.md); for how the pieces fit together see
-[`architecture.md`](./architecture.md); for getting the server running see
-[`guide.md`](./guide.md).
+the byte. For the *why* behind these shapes see the local `PLAN.md` (kept
+beside the checkout; not tracked in this repository); for how the pieces fit
+together see [`architecture.md`](./architecture.md); for getting the server
+running see [`guide.md`](./guide.md).
 
 - [Conventions](#conventions)
 - [GET /api/health](#get-apihealth)

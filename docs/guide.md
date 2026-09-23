@@ -24,8 +24,8 @@ fully with the harness absent.
 | **this file** | quickstart, model configuration, the compile phases, the guarantees the compile relies on, troubleshooting |
 | [`docs/api.md`](api.md) | the HTTP API and the SSE stream contract, including the run and generate endpoints |
 | [`docs/architecture.md`](architecture.md) | how the pieces fit, and why |
-| [`PLAN.md`](../PLAN.md) | the design record: probe facts, rejected alternatives, acceptance criteria |
-| [`PLAN-V2-FEATURES.md`](../PLAN-V2-FEATURES.md) | the plan and status for Run-from-UI, Describe → generate, and the LangGraph export target |
+| `PLAN.md` | the design record: probe facts, rejected alternatives, acceptance criteria (local; not tracked in this repository) |
+| `PLAN-V2-FEATURES.md` | the plan and status for Run-from-UI, Describe → generate, and the LangGraph export target (local, likewise) |
 
 ---
 
@@ -742,7 +742,7 @@ prompt ever asked for was a syntax check over the modules just written,
 narrowing the tool to exactly that loses no real capability and makes the
 confinement invariant true by construction instead of true by prompt
 instruction. Phase 5 is what actually executes the graph. The full record is
-in [`PLAN.md`](../PLAN.md) (the "Amendment (implementation)" note under Phase 3
+in the local `PLAN.md` (the "Amendment (implementation)" note under Phase 3
 and assumption 9).
 
 A fill run that legitimately has nothing to write — a graph whose every step
@@ -1429,7 +1429,10 @@ thing worth stating explicitly, because it *looks* like a gap and is not:
   the two-tier boundary check, the `parse_check` security property, the
   `deps_type` seam, model-route inheritance and the two emission paths, and why
   the harness SDK tie-in was dropped.
-- [`PLAN.md`](../PLAN.md) — the design record: verified probe facts, the
+- `PLAN.md` — the design record: verified probe facts, the
   rejected alternatives, edge cases, failure modes, and acceptance criteria.
 - `GROUP2_PLAN.md`, `GROUP3_PLAN.md`, `GROUP6_PLAN.md`, `spike/FINDINGS.md` —
   per-group implementation notes.
+
+`PLAN.md` and the per-group notes are local working documents kept beside the
+checkout; they are not tracked in this repository.

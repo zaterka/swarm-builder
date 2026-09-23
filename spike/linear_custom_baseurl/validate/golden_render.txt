@@ -1,9 +1,0 @@
-stateDiagram-v2
-  intake
-  research
-  summarize
-
-  [*] --> intake
-  intake --> research
-  research --> summarize
-  summarize --> [*]

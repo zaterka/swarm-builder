@@ -28,6 +28,21 @@ dist/
 .cache/
 .pnpm-store/
 
+# Local planning notes and the Group 0 spike: kept on disk, never published.
+#
+# These are working documents and oracle projects, not shipped code. The
+# files stay in the working tree (the docs cite them as the local design
+# record, and .dockerignore already excludes them from the image), but they
+# are untracked so a clone receives only the app itself.
+PLAN*.md
+GROUP*_PLAN.md
+TASK_PLAN_*.md
+spike/
+
+# Local editor and agent-tool state
+.serena/
+.claude/.headroom_wrap_settings.lock
+
 # Runtime data: saved graphs and generated projects
 workspace/
 
