@@ -42,6 +42,7 @@ from swarm_builder.compile.pipeline import (
     FillUnavailableError,
     PhaseFailureError,
     _select_filler,
+    fake_filler,
     run_compile,
 )
 from swarm_builder.compile.review import review
@@ -179,6 +180,183 @@ def _make_always_fail_filler() -> tuple[Filler, list[str | None]]:
 # ---------------------------------------------------------------------------
 # 1. The full five-phase run, through the real keyless validation gate
 # ---------------------------------------------------------------------------
+
+
+async def test_dry_run_switch_alone_selects_the_stub_fill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The app's own dry-run switch is enough -- no ``SWARM_FAKE_FILL`` in the
+    environment -- so a brand-new user can compile with no provider at all.
+
+    The injected filler explodes, so the compile could only succeed by using
+    the stub; the ``done`` payload then reports ``dryRun`` so a client can
+    label the result honestly.
+    """
+    from swarm_builder.appconfig import AppConfig, save_config
+
+    monkeypatch.delenv("SWARM_FAKE_FILL", raising=False)
+    save_config(AppConfig(dry_run=True))
+
+    def exploding_filler(**kwargs: object) -> object:
+        raise AssertionError("the model-backed filler must not be used in dry run")
+
+    graph = POSITIVE_FIXTURES["mixed_programmatic"]()
+    registry = JobRegistry()
+    compile_id = _register(registry, graph)
+    monkeypatch.setenv("SWARM_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh_home"))
+
+    outcome = await run_compile(
+        graph,
+        registry=registry,
+        compile_id=compile_id,
+        project_dir=tmp_path / "dry-run",
+        dsh_home=tmp_path / "dsh_home",
+        filler=exploding_filler,  # type: ignore[arg-type]
+        uv_cache_dir=UV_CACHE_DIR,
+    )
+
+    assert registry.get(compile_id).status == "succeeded"
+    assert outcome.dry_run is True
+    payload = registry.get(compile_id).result.value
+    assert payload is not None and payload["dryRun"] is True
+
+
+async def test_an_explicit_live_request_cannot_defeat_an_exported_offline_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``SWARM_FAKE_FILL=1`` exists so an offline or CI run cannot silently
+    spend real credentials, so an explicit "run for real" must not override it
+    -- checked once, at the freeze point."""
+    monkeypatch.setenv("SWARM_FAKE_FILL", "1")
+
+    def exploding_filler(**kwargs: object) -> object:
+        raise AssertionError("the model-backed filler must not be used")
+
+    graph = POSITIVE_FIXTURES["mixed_programmatic"]()
+    registry = JobRegistry()
+    compile_id = _register(registry, graph)
+    monkeypatch.setenv("SWARM_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh_home"))
+
+    outcome = await run_compile(
+        graph,
+        registry=registry,
+        compile_id=compile_id,
+        project_dir=tmp_path / "forced",
+        dsh_home=tmp_path / "dsh_home",
+        filler=exploding_filler,  # type: ignore[arg-type]
+        uv_cache_dir=UV_CACHE_DIR,
+        dry_run=False,  # deliberately asking for a real compile
+    )
+
+    assert registry.get(compile_id).status == "succeeded"
+    assert outcome.dry_run is True
+
+
+async def test_an_explicit_dry_run_argument_beats_a_flipped_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A run freezes the decision at job start and passes it down. Flipping
+    the persisted switch afterwards must not change which filler the job that
+    is already running selected."""
+
+    def exploding_filler(**kwargs: object) -> object:
+        raise AssertionError("the model-backed filler must not be used in dry run")
+
+    graph = POSITIVE_FIXTURES["mixed_programmatic"]()
+    registry = JobRegistry()
+    compile_id = _register(registry, graph)
+    monkeypatch.setenv("SWARM_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh_home"))
+    monkeypatch.delenv("SWARM_FAKE_FILL", raising=False)
+
+    # The switch is OFF in the persisted configuration; the explicit argument
+    # is what decides.
+    outcome = await run_compile(
+        graph,
+        registry=registry,
+        compile_id=compile_id,
+        project_dir=tmp_path / "frozen",
+        dsh_home=tmp_path / "dsh_home",
+        filler=exploding_filler,  # type: ignore[arg-type]
+        uv_cache_dir=UV_CACHE_DIR,
+        dry_run=True,
+    )
+
+    assert registry.get(compile_id).status == "succeeded"
+    assert outcome.dry_run is True
+
+
+def test_unknown_model_warning_is_suppressed_for_the_offline_default() -> None:
+    """The internal stand-in model id is not a decision the user made, so it
+    must never be the subject of a "check your model id" warning."""
+    from swarm_builder.compile import ResolvedModel
+    from swarm_builder.compile.pipeline import _warn_if_model_name_unknown
+    from swarm_builder.inherit.settings import EffectiveModel
+
+    registry = JobRegistry()
+    job = registry.register("warn", "g1", kind="compile")
+
+    effective = EffectiveModel(
+        provider="deepseek-official",
+        model="not-a-real-model",
+        reasoning_effort=None,
+        base_url=None,
+        api_key_env=None,
+        source="bundle-default",
+        route=None,
+    )
+    resolved = ResolvedModel(
+        helper_source="DEFAULT_MODEL = 'deepseek:not-a-real-model'",
+        default_factory_name="_resolve_default_model",
+        extra_imports=(),
+        pyproject_extras=("openai",),
+        env_lines=("SWARM_MODEL=deepseek:not-a-real-model",),
+        readme_model_note="",
+    )
+
+    _warn_if_model_name_unknown(job, effective, resolved)
+
+    assert [payload for _, payload in _events(job)] == []
+
+
+def test_unknown_model_warning_still_fires_for_a_chosen_model() -> None:
+    """The warning keeps its purpose: it catches a model id the user picked
+    that the installed pydantic-ai does not know, before the export is run
+    for real."""
+    from swarm_builder.compile import ResolvedModel
+    from swarm_builder.compile.pipeline import _warn_if_model_name_unknown
+    from swarm_builder.inherit.settings import EffectiveModel
+
+    registry = JobRegistry()
+    job = registry.register("warn", "g1", kind="compile")
+
+    effective = EffectiveModel(
+        provider="openai",
+        model="not-a-real-model",
+        reasoning_effort=None,
+        base_url=None,
+        api_key_env="OPENAI_API_KEY",
+        source="app-config",
+        route=None,
+    )
+    resolved = ResolvedModel(
+        helper_source="DEFAULT_MODEL = 'openai:not-a-real-model'",
+        default_factory_name="_resolve_default_model",
+        extra_imports=(),
+        pyproject_extras=("openai",),
+        env_lines=("SWARM_MODEL=openai:not-a-real-model",),
+        readme_model_note="",
+    )
+
+    _warn_if_model_name_unknown(job, effective, resolved)
+
+    warnings = [payload for event_type, payload in _events(job) if event_type == "warning"]
+    assert warnings and warnings[0]["code"] == "unknown_model_name"
+    assert "Model settings" in warnings[0]["message"]
+    for foreign in ("harness", "settings.yaml"):
+        assert foreign not in warnings[0]["message"]
 
 
 @pytest.mark.slow
@@ -950,12 +1128,29 @@ def test_select_filler_reports_fill_unavailable_with_both_ways_out(
     """The unavailability error is its own type and names both remedies."""
     monkeypatch.delenv("SWARM_FAKE_FILL", raising=False)
     with pytest.raises(FillUnavailableError) as excinfo:
-        _select_filler(None)
+        _select_filler(None, dry_run=False)
 
     message = str(excinfo.value)
     assert "SWARM_FAKE_FILL=1" in message
     assert "compile/agent.py" in message
     assert "inject" in message
+
+
+def test_select_filler_honours_the_frozen_decision_not_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The filler is chosen from the decision ``run_compile`` froze at job
+    start, never re-read here: a switch flipped mid-compile must not change
+    which bodies the project gets."""
+
+    async def injected_filler(**kwargs: object) -> FillResult:
+        return FillResult()
+
+    monkeypatch.setenv("SWARM_FAKE_FILL", "1")
+    assert _select_filler(injected_filler, dry_run=False) is injected_filler
+
+    monkeypatch.delenv("SWARM_FAKE_FILL", raising=False)
+    assert _select_filler(injected_filler, dry_run=True) is fake_filler
 
 
 async def test_fill_timeout_is_enforced(

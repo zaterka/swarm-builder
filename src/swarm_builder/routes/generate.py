@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UserError
 
+from swarm_builder import runtime
 from swarm_builder.config import get_dsh_home, get_workspace_dir
 from swarm_builder.inherit.routes import UnmappableRouteError, build_live_model
 from swarm_builder.inherit.settings import resolve_effective_model
@@ -63,6 +64,10 @@ class GenerateGraphResponse(_CamelModel):
     warnings: list[FindingOut]
     attempts: int
     model: GenerateModelOut
+    #: True when the draft came from the deterministic stub rather than a
+    #: model, so the UI can say so instead of presenting stub output as a
+    #: model's work.
+    dry_run: bool
 
 
 @router.post(
@@ -104,24 +109,27 @@ async def generate_graph_route(body: GenerateGraphRequest) -> GenerateGraphRespo
         )
     effective = resolve_effective_model(get_dsh_home(), override)
 
+    # Dry run (the app's own switch, or one of the SWARM_FAKE_* environment
+    # variables) replaces the model with a deterministic stub, so neither the
+    # "nothing configured" gate nor the credential check applies: a brand-new
+    # user who turned dry run on must be able to describe a workflow without
+    # a provider at all.
+    dry_run = runtime.dry_run_active()
+
     model = None
-    if not generate_module.fake_generate_enabled():
+    if not dry_run:
         if effective.source == "bundle-default":
             raise HTTPException(
                 status_code=503,
                 detail=(
-                    "No model route configured: set agent-default-model in settings.yaml "
-                    "or SWARM_MODEL before generating a graph."
+                    "No model is configured yet. Choose a provider and add your API "
+                    "key in Model settings, or turn on Dry run mode to build and run "
+                    "offline."
                 ),
             )
         missing_credential = credential_blocker(effective)
         if missing_credential is not None:
-            raise HTTPException(
-                status_code=503,
-                detail=missing_credential.replace("Run disabled", "Generate disabled", 1)
-                + " Export it in the shell that starts the server, or put it in the "
-                "repo-root .env file (loaded at startup).",
-            )
+            raise HTTPException(status_code=503, detail=missing_credential)
         try:
             model = build_live_model(effective).model
         except UnmappableRouteError as exc:
@@ -178,4 +186,5 @@ async def generate_graph_route(body: GenerateGraphRequest) -> GenerateGraphRespo
         model=GenerateModelOut(
             provider=effective.provider, model=effective.model, source=effective.source
         ),
+        dry_run=dry_run,
     )

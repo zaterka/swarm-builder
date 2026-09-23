@@ -59,7 +59,7 @@ const PROGRESS_LABELS = {
  * and last seen event id live in `sessionStorage`, snapshot first, then
  * resubscribe with `Last-Event-ID`.
  */
-export function RunPanel() {
+export function RunPanel({ settingsRevision = 0 }: { settingsRevision?: number } = {}) {
   const graph = useGraphStore((s) => s.graph);
   const run = useGraphStore((s) => s.run);
   const setRunState = useGraphStore((s) => s.setRunState);
@@ -91,7 +91,9 @@ export function RunPanel() {
 
   useEffect(() => {
     refreshHealth();
-  }, []);
+    // Re-read after a settings save: a new key or a flipped dry-run switch is
+    // visible on the very next request, with no page reload.
+  }, [settingsRevision]);
 
   useEffect(() => {
     if (graph) refreshHistory(graph.id);
@@ -244,7 +246,13 @@ export function RunPanel() {
             </ul>
           </div>
         )}
-        {runReady && !acknowledged && (
+        {health?.dryRun && (
+          <div className="sb-hint sb-run-notice">
+            Dry run mode: the run executes against a keyless test model, so nothing reaches a
+            provider and the output below is not real model output.
+          </div>
+        )}
+        {runReady && !acknowledged && !health?.dryRun && (
           <div className="sb-hint sb-run-notice">
             Running executes the generated project on this machine with the credentials configured
             for the resolved model. Generated step bodies are model-written code.{' '}

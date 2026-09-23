@@ -50,6 +50,7 @@ the repository is what you ship.
 
 | | |
 |---|---|
+| **Configure a model in the app** | Pick a provider, paste a key, test it — no file, no environment variable, no restart. Turn on dry run to work offline. |
 | **Describe → workflow** | Write a paragraph. The model drafts nodes and edges; deterministic code derives ids, decision branches, fan-out wiring, state fields and layout; the same reviewer that gates a compile checks the draft and feeds errors back. You land on an editable canvas. |
 | **Run on the canvas** | Execute the compiled project with your credentials and watch it node by node: live status on each node, per-node inputs and outputs, final state, run history. Edit and run again; a stale project recompiles first, in the same stream. |
 | **Compile to PydanticAI** | Five phases: review → scaffold → fill → boundary → validate. Nothing is written until review passes. The output is a project with `pyproject.toml`, pinned dependencies, and its own validation gate. |
@@ -89,14 +90,28 @@ uv run swarm-builder
 # Swarm Builder listening at http://127.0.0.1:8420
 ```
 
-**Model route.** Swarm Builder reads a [DeepSeek Harness](https://github.com/deepseek-ai)
-`settings.yaml` when present, or `SWARM_MODEL` (a PydanticAI known name such as
-`openai:<model>`, `anthropic:<model>`, `deepseek:<model>`, `bedrock:<model>`, or a bare id plus
-`SWARM_BASE_URL` for an OpenAI-compatible endpoint). Put it and your provider key in a `.env`
-at the repo root; it is loaded at startup. Copy `.env.example` to begin.
+**Configure a model in the app.** Every screen's top bar shows the model in use and a
+**Model settings** button; when something needs doing, the start screen also says so in the page
+body with the remedy. Choose a provider — OpenAI, Anthropic, DeepSeek, Google Gemini, Groq,
+Mistral, Amazon Bedrock, or any custom OpenAI-compatible endpoint — paste your API key, press
+**Save**, then **Test connection** to prove it works with one small call.
+Nothing else is required: no `.env`, no configuration file, no restart. The key is stored in
+`workspace/settings.json` (owner-only, git-ignored) and is never sent back to the browser.
 
-**No credentials yet?** `SWARM_FAKE_FILL=1 SWARM_FAKE_GENERATE=1 SWARM_RUN_TEST_MODEL=1`
-runs the entire pipeline — generate, compile, both targets, run — with deterministic stubs.
+**No credentials yet?** Turn on **Dry run mode** in the same screen: describe, compile (both
+targets) and run all work offline against deterministic stubs and a keyless test model, with no
+account anywhere. The app badges the session `DRY RUN` so stub output is never mistaken for real
+output. For CI or containers the equivalent environment variables are
+`SWARM_FAKE_FILL=1 SWARM_FAKE_GENERATE=1 SWARM_RUN_TEST_MODEL=1`; setting any of them locks the
+in-app switch on.
+
+**Advanced: inherit an existing configuration.** Swarm Builder still reads a
+[DeepSeek Harness](https://github.com/deepseek-ai) `settings.yaml` when one is present, and
+`SWARM_MODEL` otherwise (a PydanticAI known name such as `openai:<model>`,
+`anthropic:<model>`, `deepseek:<model>`, `bedrock:<model>`, or a bare id plus `SWARM_BASE_URL`
+for an OpenAI-compatible endpoint). Put it and your provider key in a `.env` at the repo root;
+it is loaded at startup. This path is optional, and a model saved in the app takes precedence
+over it. Copy `.env.example` to begin.
 
 Docker: `docker compose up --build` (see the [guide](docs/guide.md#run-with-docker)).
 
@@ -106,7 +121,7 @@ Docker: `docker compose up --build` (see the [guide](docs/guide.md#run-with-dock
 |---|---|---|
 | Status | Available now | **Planned.** [Tell us you're interested](https://github.com/zaterka/swarm-builder/issues/new?title=Interested%20in%20Swarm%20Builder%20Cloud&labels=cloud) |
 | Where it runs | Your machine or your infrastructure, bound to loopback by default | Hosted canvas and compile service |
-| Model routes | Bring your own keys; harness settings inherited | Bring your own keys, or managed routes |
+| Model routes | Bring your own keys, configured in the app; an inherited harness configuration is optional | Bring your own keys, or managed routes |
 | Exports | PydanticAI and LangGraph projects, identical in both | Same exports; the code you get is never different |
 | Team features | — | Shared graphs, run history across a team, review workflow, CI hooks for exports |
 | Support | GitHub issues | Support with response times |

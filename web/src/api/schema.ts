@@ -41,6 +41,7 @@ export type InitialFactory = NonNullable<JoinSpec['initialFactory']>;
 export type HealthResponse = components['schemas']['HealthResponse'];
 export type ResolvedModelSummary = components['schemas']['ResolvedModelSummary'];
 export type ModelsResponse = components['schemas']['ModelsResponse'];
+export type AppRouteOut = NonNullable<ModelsResponse['appRoute']>;
 export type RouteOut = components['schemas']['RouteOut'];
 export type ModelInfoOut = components['schemas']['ModelInfoOut'];
 export type ResolvedDefaultOut = components['schemas']['ResolvedDefaultOut'];
@@ -80,6 +81,18 @@ export type RunListResponse = components['schemas']['RunListResponse'];
 // Describe -> generate (`routes/generate.py`).
 export type GenerateGraphRequest = components['schemas']['GenerateGraphRequest'];
 export type GenerateGraphResponse = components['schemas']['GenerateGraphResponse'];
+
+// In-app model settings (`routes/settings.py`). `SavedModelOut` deliberately
+// has no field for the API key itself: the server reports only whether one is
+// stored and its last four characters, so there is no type here that could
+// carry a secret into the client even by mistake.
+export type SettingsResponse = components['schemas']['SettingsResponse'];
+export type SettingsUpdateRequest = components['schemas']['SettingsUpdateRequest'];
+export type ModelInput = components['schemas']['ModelInput'];
+export type SavedModelOut = components['schemas']['SavedModelOut'];
+export type ProviderOut = components['schemas']['ProviderOut'];
+export type TestConnectionRequest = components['schemas']['TestConnectionRequest'];
+export type TestConnectionResponse = components['schemas']['TestConnectionResponse'];
 
 export const PORT_TYPES: readonly PortType[] = ['str', 'json', 'list[str]'];
 export const REDUCER_IDS: readonly ReducerId[] = [

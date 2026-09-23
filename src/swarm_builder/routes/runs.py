@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
+from swarm_builder import runtime
 from swarm_builder.config import get_dsh_home, get_workspace_dir
 from swarm_builder.models import SwarmGraph
 from swarm_builder.routes.compile import (
@@ -76,6 +77,9 @@ class StartRunRequest(_CamelModel):
 class StartRunResponse(_CamelModel):
     run_id: str
     will_compile: bool
+    #: Whether this run executes against the generated project's keyless
+    #: ``TestModel`` (dry run) rather than its real model.
+    dry_run: bool
 
 
 class RunListResponse(_CamelModel):
@@ -145,7 +149,14 @@ async def start_run(graph_id: str, body: StartRunRequest) -> StartRunResponse:
             "cancel it or wait for it to finish",
         ) from exc
 
-    _persist(workspace_dir, job, graph.id, body.input, created_at=datetime.now(UTC))
+    # Frozen here, at job start, and passed explicitly to both the run and
+    # the compile-it-may-perform-first: one run must never mix a stub compile
+    # with a real model call (or the reverse) because the switch moved.
+    dry_run = runtime.dry_run_active()
+
+    _persist(
+        workspace_dir, job, graph.id, body.input, created_at=datetime.now(UTC), dry_run=dry_run
+    )
     job.task = asyncio.create_task(
         _run_job(
             graph,
@@ -155,9 +166,10 @@ async def start_run(graph_id: str, body: StartRunRequest) -> StartRunResponse:
             project_dir=target_dir,
             input_value=body.input,
             compile_if_stale=body.compile_if_stale,
+            dry_run=dry_run,
         )
     )
-    return StartRunResponse(run_id=run_id, will_compile=stale)
+    return StartRunResponse(run_id=run_id, will_compile=stale, dry_run=dry_run)
 
 
 async def _run_job(
@@ -169,8 +181,14 @@ async def _run_job(
     project_dir: Path,
     input_value: object,
     compile_if_stale: bool,
+    dry_run: bool,
 ) -> None:
-    """Drive one run to completion as its job's own task, then persist it."""
+    """Drive one run to completion as its job's own task, then persist it.
+
+    ``dry_run`` was decided at job start and is handed to both halves of this
+    job: the compile that may run first (so a stub run never sits on top of a
+    model-written project) and the tracer itself (via the child environment).
+    """
     job = registry.get(run_id)
     created_at = job.created_at
     try:
@@ -178,7 +196,10 @@ async def _run_job(
         compile_first = None
         if compile_if_stale:
             run_compile = _load_run_compile()
-            filler = _load_filler()
+            # In dry run the model-backed filler will not be selected, so it is
+            # not loaded: a job that cannot call a model must not fail because a
+            # provider package is missing (health advertises it as runnable).
+            filler = None if dry_run else _load_filler()
 
             async def compile_first() -> object:
                 return await run_compile(
@@ -189,11 +210,29 @@ async def _run_job(
                     dsh_home=get_dsh_home(),
                     filler=filler,
                     finalize=False,
+                    dry_run=dry_run,
                 )
 
-    except HTTPException as exc:
-        registry.mark_failed(run_id, _PipelineUnavailableError(str(exc.detail)))
-        _persist(workspace_dir, job, graph.id, input_value, created_at=created_at)
+    except asyncio.CancelledError:
+        # A cancel during the pre-flight is a cancelled run, not a stuck one.
+        if job.is_live():
+            job.mark_cancelled()
+        _persist_best_effort(
+            workspace_dir,
+            job,
+            graph.id,
+            input_value,
+            created_at=created_at,
+            dry_run=dry_run,
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # Deliberately broader than HTTPException: anything raised while the
+        # run modules are imported would otherwise escape before the job was
+        # ever marked terminal, leaving it ``queued`` forever with a task whose
+        # exception nobody observes.
+        registry.mark_failed(run_id, _PipelineUnavailableError(str(exc)))
+        _persist(workspace_dir, job, graph.id, input_value, created_at=created_at, dry_run=dry_run)
         return
 
     try:
@@ -204,30 +243,87 @@ async def _run_job(
             project_dir=project_dir,
             input_value=input_value,
             compile_if_stale=compile_first,
+            dry_run=dry_run,
+            # The frozen decision, not a fresh read: the child must be
+            # configured exactly as the rest of this job was.
+            extra_env=runtime.child_env_overrides(dry_run=dry_run),
         )
     except asyncio.CancelledError:
-        _persist(workspace_dir, job, graph.id, input_value, created_at=created_at)
+        _persist_best_effort(
+            workspace_dir,
+            job,
+            graph.id,
+            input_value,
+            created_at=created_at,
+            dry_run=dry_run,
+        )
         raise
-    except Exception:
-        # Already recorded on the job by run_project (or by the compile).
-        pass
-    _persist(workspace_dir, job, graph.id, input_value, created_at=created_at)
+    except Exception as exc:  # noqa: BLE001
+        # Normally already recorded on the job by run_project (or by the
+        # compile it performed). If it is somehow still live, marking it here
+        # is what keeps a phantom ``running`` job out of the history.
+        if job.is_live():
+            job.append_event(
+                "error",
+                {"code": "run_failed", "message": str(exc), "exception": type(exc).__name__},
+            )
+            registry.mark_failed(run_id, exc)
+    _persist(workspace_dir, job, graph.id, input_value, created_at=created_at, dry_run=dry_run)
 
 
 def _persist(
-    workspace_dir: Path, job: Job, graph_id: str, input_value: object, *, created_at: datetime
+    workspace_dir: Path,
+    job: Job,
+    graph_id: str,
+    input_value: object,
+    *,
+    created_at: datetime,
+    dry_run: bool,
 ) -> None:
     """Write the run's record from the job's retained events. Best effort:
-    a failed write must not fail the run itself."""
-    record = _record_from_job(job, graph_id, input_value, created_at)
+    a failed write must not fail the run itself.
+
+    ``dry_run`` is the value frozen at job start, recorded directly rather than
+    inferred from the terminal event: a job that failed or was cancelled before
+    it finished never emits that event, and history must not present a stub run
+    as a real (potentially billed) one.
+    """
+    record = _record_from_job(job, graph_id, input_value, created_at, dry_run=dry_run)
     try:
         put_run(workspace_dir, record)
     except (RunStoreError, InvalidGraphIdError):
         pass
 
 
+def _persist_best_effort(
+    workspace_dir: Path,
+    job: Job,
+    graph_id: str,
+    input_value: object,
+    *,
+    created_at: datetime,
+    dry_run: bool,
+) -> None:
+    """Persist from an exception path, never letting a failure escape.
+
+    Used on cancellation: a write that raised here would replace the
+    ``CancelledError`` and turn a cancelled run into a failed task.
+    """
+    try:
+        _persist(
+            workspace_dir,
+            job,
+            graph_id,
+            input_value,
+            created_at=created_at,
+            dry_run=dry_run,
+        )
+    except Exception:  # noqa: BLE001 - a lost record must not mask a cancellation
+        pass
+
+
 def _record_from_job(
-    job: Job, graph_id: str, input_value: object, created_at: datetime
+    job: Job, graph_id: str, input_value: object, created_at: datetime, *, dry_run: bool
 ) -> RunRecord:
     nodes: dict[str, NodeRunRecord] = {}
     model: str | None = None
@@ -254,6 +350,10 @@ def _record_from_job(
                 model = payload["model"]  # type: ignore[assignment]
             if payload.get("compiled") is True:
                 compiled = True
+            # The terminal payload is corroboration only; the frozen value
+            # passed in is what gets recorded.
+            if payload.get("dryRun") is True:
+                dry_run = True
 
     result = job.result.value or {}
     state = result.get("state")
@@ -271,6 +371,7 @@ def _record_from_job(
         model=model,
         duration_ms=duration if isinstance(duration, int) else None,
         compiled=compiled or result.get("compiled") is True,
+        dry_run=dry_run or result.get("dryRun") is True,
         nodes=nodes,
     )
 

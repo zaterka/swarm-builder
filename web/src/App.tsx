@@ -8,8 +8,11 @@ import Inspector from './panels/Inspector';
 import CompilePanel from './panels/CompilePanel';
 import RunPanel from './panels/RunPanel';
 import GeneratePanel from './panels/GeneratePanel';
-import type { FindingOut, SwarmGraph } from './api/schema';
+import type { FindingOut, HealthResponse, SwarmGraph } from './api/schema';
 import GraphPicker from './panels/GraphPicker';
+import ModelSettings from './panels/ModelSettings';
+import DryRunBadge from './panels/DryRunBadge';
+import StartTopBar from './panels/StartTopBar';
 import './App.css';
 
 const AUTOSAVE_DEBOUNCE_MS = 800;
@@ -27,8 +30,23 @@ type DrawerTab = 'compile' | 'run';
 export function App() {
   const [screen, setScreen] = useState<Screen>({ name: 'picker' });
   const [drawerTab, setDrawerTab] = useState<DrawerTab>('compile');
+  // Whether the model-settings screen is open, and a counter the panels use
+  // to re-read `/api/health` after a save (every read is fresh server-side, so
+  // a bump is all it takes for a new provider to take effect with no reload).
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsRevision, setSettingsRevision] = useState(0);
+  // The shell owns the start screen's health read because two surfaces render
+  // from it -- the top bar (chrome, outside the centered start column) and the
+  // picker's notice -- and two independent reads could disagree about the model.
+  // A failed read is `null`, which the bar reports as "checking" and the picker
+  // treats as "no strip", exactly as before.
+  const [health, setHealth] = useState<HealthResponse | null>(null);
   const [showRegenerate, setShowRegenerate] = useState(false);
-  const [generatedNotice, setGeneratedNotice] = useState<{ warnings: FindingOut[]; attempts: number } | null>(null);
+  const [generatedNotice, setGeneratedNotice] = useState<{
+    warnings: FindingOut[];
+    attempts: number;
+    dryRun: boolean;
+  } | null>(null);
   const selectNodes = useGraphStore((s) => s.selectNodes);
   const graph = useGraphStore((s) => s.graph);
   const dirty = useGraphStore((s) => s.dirty);
@@ -110,6 +128,21 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dirty, graph]);
 
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .health()
+      .then((value) => {
+        if (!cancelled) setHealth(value);
+      })
+      .catch(() => {
+        if (!cancelled) setHealth(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [settingsRevision]);
+
   const openGraph = async (id: string) => {
     const g = await api.getGraph(id);
     loadGraph(g);
@@ -126,16 +159,43 @@ export function App() {
   // A generated graph is already saved by the server; load it as an ordinary
   // document, select every node so the review is visible at a glance, and
   // keep a dismissible notice with the reviewer's warnings.
-  const onGenerated = (g: SwarmGraph, warnings: FindingOut[], attempts: number) => {
+  const onGenerated = (
+    g: SwarmGraph,
+    warnings: FindingOut[],
+    attempts: number,
+    dryRun = false,
+  ) => {
     loadGraph(g);
     selectNodes((g.nodes ?? []).map((n) => n.id));
-    setGeneratedNotice({ warnings, attempts });
+    setGeneratedNotice({ warnings, attempts, dryRun });
     setShowRegenerate(false);
     setScreen({ name: 'workspace' });
   };
 
+  const modelSettings = showSettings ? (
+    <ModelSettings
+      onClose={() => setShowSettings(false)}
+      onSaved={() => setSettingsRevision((n) => n + 1)}
+    />
+  ) : null;
+
   if (screen.name === 'picker') {
-    return <GraphPicker onOpen={openGraph} onCreateNew={createNew} onGenerated={onGenerated} />;
+    return (
+      <>
+        {/* Chrome, so it sits outside the centered start column -- the same bar
+            the workspace has, in the same place. */}
+        <StartTopBar health={health} onOpenSettings={() => setShowSettings(true)} />
+        <GraphPicker
+          onOpen={openGraph}
+          onCreateNew={createNew}
+          onGenerated={onGenerated}
+          settingsRevision={settingsRevision}
+          onOpenSettings={() => setShowSettings(true)}
+          health={health}
+        />
+        {modelSettings}
+      </>
+    );
   }
 
   return (
@@ -144,6 +204,14 @@ export function App() {
         <button className="sb-btn-ghost" onClick={() => setScreen({ name: 'picker' })}>
           ← Graphs
         </button>
+        <button
+          className="sb-btn-ghost sb-btn-sm"
+          onClick={() => setShowSettings(true)}
+          title="Choose the provider and API key used for describing, compiling and running"
+        >
+          Model settings
+        </button>
+        <DryRunBadge revision={settingsRevision} />
         <span className="sb-graph-name">{graph?.name}</span>
         <button
           className="sb-btn-ghost sb-btn-sm"
@@ -179,7 +247,9 @@ export function App() {
       {generatedNotice && (
         <div className="sb-generated-notice" role="status">
           <span>
-            Generated from your description
+            {generatedNotice.dryRun
+              ? 'Drafting was done in Dry run mode: this graph came from the built-in stub, not a model. '
+              : 'Generated from your description'}
             {generatedNotice.attempts > 1 ? ` (${generatedNotice.attempts} drafts)` : ''} — review the
             nodes, then Compile or Run.
           </span>
@@ -232,12 +302,13 @@ export function App() {
         {/* Both panels stay mounted so a live SSE subscription survives a tab
             switch; the inactive one is only hidden. */}
         <div hidden={drawerTab !== 'compile'}>
-          <CompilePanel />
+          <CompilePanel settingsRevision={settingsRevision} />
         </div>
         <div hidden={drawerTab !== 'run'}>
-          <RunPanel />
+          <RunPanel settingsRevision={settingsRevision} />
         </div>
       </div>
+      {modelSettings}
     </div>
   );
 }

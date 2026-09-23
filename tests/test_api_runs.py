@@ -54,10 +54,13 @@ def anyio_backend() -> str:
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SWARM_WORKSPACE", str(tmp_path / "workspace"))
     monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh_home"))
+    monkeypatch.setenv("SWARM_CONFIG", str(tmp_path / "workspace" / "settings.json"))
     monkeypatch.setenv("UV_CACHE_DIR", str(UV_CACHE_DIR))
     monkeypatch.delenv("SWARM_MODEL", raising=False)
     monkeypatch.delenv("SWARM_BASE_URL", raising=False)
     monkeypatch.delenv("SWARM_API_KEY_ENV", raising=False)
+    for name in ("SWARM_FAKE_FILL", "SWARM_FAKE_GENERATE", "SWARM_RUN_TEST_MODEL"):
+        monkeypatch.delenv(name, raising=False)
     return tmp_path / "workspace"
 
 
@@ -219,6 +222,164 @@ def test_health_reports_run_readiness_fields(workspace: Path) -> None:
     # Every compile blocker is also a run blocker.
     for blocker in body["blockers"]:
         assert blocker in body["runBlockers"]
+
+
+def test_dry_run_removes_credentials_from_the_child_environment(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dry run must not be able to spend money even if the generated project
+    ignores ``SWARM_RUN_TEST_MODEL`` -- a project the user edited, or one
+    generated before the flag existed. The credentials are removed from the
+    child's environment, so "cannot spend" is a property of the environment
+    rather than a promise about model-authored code."""
+    from swarm_builder import runtime
+    from swarm_builder.appconfig import AppConfig, AppModelConfig, save_config
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-should-not-reach-the-child")
+    save_config(
+        AppConfig(model=AppModelConfig(provider="openai", model="gpt-5.4-mini", api_key="sk-x"))
+    )
+    runtime.publish_secrets()
+
+    env = runtime.child_process_env(
+        uv_cache_dir=UV_CACHE_DIR, extra_env={runtime.RUN_TEST_MODEL_ENV_VAR: "1"}, dry_run=True
+    )
+
+    assert env[runtime.RUN_TEST_MODEL_ENV_VAR] == "1"
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "SWARM_API_KEY"):
+        assert name not in env, name
+
+
+def test_a_real_run_keeps_the_credentials_in_the_child_environment(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from swarm_builder import runtime
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-live")
+    env = runtime.child_process_env(uv_cache_dir=UV_CACHE_DIR, dry_run=False)
+
+    assert env["OPENAI_API_KEY"] == "sk-live"
+
+
+def test_a_dry_run_with_no_provider_installed_does_not_require_the_filler(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model-backed filler is not loaded in dry run: a job that will not
+    call a model must not fail because a provider package or credential is
+    missing -- health advertises exactly this job as runnable."""
+    from swarm_builder.appconfig import AppConfig, save_config
+    from swarm_builder.routes import compile as compile_routes
+
+    save_config(AppConfig(dry_run=True))
+    monkeypatch.setattr(
+        compile_routes, "_load_filler", lambda: (_ for _ in ()).throw(AssertionError("loaded"))
+    )
+
+    graph_id = _save_graph(_client(), linear_chat_graph())
+    response = _client().post(f"/api/graphs/{graph_id}/runs", json={"input": "hi"})
+
+    assert response.status_code == 202
+    assert response.json()["dryRun"] is True
+
+
+def test_dry_run_makes_run_ready_without_credentials(workspace: Path) -> None:
+    """With dry run on, the run executes against a keyless ``TestModel``, so a
+    missing credential is no longer a reason to disable Run."""
+    from swarm_builder.appconfig import AppConfig, save_config
+
+    save_config(AppConfig(dry_run=True))
+    body = _client().get("/api/health").json()
+    assert body["dryRun"] is True
+    assert body["runReady"] is True
+    assert body["runBlockers"] == []
+
+
+async def test_dry_run_is_frozen_into_the_child_environment(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tracer subprocess is told to use the keyless test model through the
+    environment, so a run can happen with no credential at all.
+
+    Asserted on ``_execute``'s own env construction (the real ``uv`` run is
+    the ``slow`` suite's job): the spawned command is intercepted and the
+    environment it would have received is inspected.
+    """
+    from swarm_builder import runtime
+    from swarm_builder.appconfig import AppConfig, save_config
+
+    save_config(AppConfig(dry_run=True))
+    assert runtime.child_env_overrides() == {runtime.RUN_TEST_MODEL_ENV_VAR: "1"}
+
+    captured: dict[str, object] = {}
+
+    async def _capture(*args: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        raise _StopBeforeSubprocess
+
+    monkeypatch.setattr(run_module.asyncio, "create_subprocess_exec", _capture)
+
+    registry = JobRegistry()
+    job = registry.register("dry-run-env", "g1", kind="run")
+    job.mark_running()
+
+    with pytest.raises(_StopBeforeSubprocess):
+        await run_module._execute(
+            job,
+            project_dir=workspace,
+            input_value="hi",
+            uv_cache_dir=UV_CACHE_DIR,
+            timeout_s=1.0,
+            extra_env=runtime.child_env_overrides(),
+        )
+
+    env = captured.get("env")
+    assert isinstance(env, dict)
+    assert env[runtime.RUN_TEST_MODEL_ENV_VAR] == "1"
+
+
+class _StopBeforeSubprocess(RuntimeError):
+    """Raised by the intercepted spawn so no real ``uv`` process starts."""
+
+
+def test_a_failed_dry_run_is_recorded_as_a_dry_run(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job that fails or is cancelled never emits its terminal payload, so
+    the frozen value -- not the event -- is what the history records. Otherwise
+    a stub run would be presented as a real, potentially billed one."""
+    from swarm_builder.appconfig import AppConfig, save_config
+    from swarm_builder.routes.runs import _record_from_job
+
+    save_config(AppConfig(dry_run=True))
+    client = _client()
+    graph_id = _save_graph(client, linear_chat_graph())
+
+    registry = compile_routes._require_registry()
+    job = registry.register("failed-run", graph_id, kind="run")
+    job.mark_failed(RuntimeError("provider refused"))
+
+    record = _record_from_job(
+        job, graph_id, "hi", datetime.now(UTC), dry_run=True
+    )
+    assert record.dry_run is True
+
+
+def test_a_run_record_written_before_dry_run_existed_still_parses(
+    workspace: Path, tmp_path: Path
+) -> None:
+    """``dryRun`` is an additive field: an existing ``workspace/runs/``
+    directory must keep loading."""
+    record = {
+        "runId": "legacy",
+        "graphId": "g1",
+        "status": "succeeded",
+        "createdAt": datetime.now(UTC).isoformat(),
+        "nodes": {},
+    }
+    path = tmp_path / "legacy.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    loaded = RunRecord.model_validate_json(path.read_text(encoding="utf-8"))
+    assert loaded.dry_run is False
 
 
 def test_start_run_refuses_bad_input_with_422(workspace: Path) -> None:

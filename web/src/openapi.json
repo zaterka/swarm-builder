@@ -11,7 +11,7 @@
           "health"
         ],
         "summary": "Get Health",
-        "description": "Report server version, resolved model/settings state, and\nwhether a compile is currently expected to succeed.\n\n``compile_ready`` is ``False`` -- with a human-readable string\nappended to ``blockers`` for each contributing reason -- whenever\nany of: the resolved default model came from the bundle fallback\n(nothing the user actually configured); ``uv`` is not on ``PATH``;\nthe resolved workspace directory is not writable; or\n``settings.yaml`` exists but failed to parse/read. Otherwise\n``compile_ready`` is ``True`` and ``blockers`` is empty.",
+        "description": "Report server version, resolved model/settings state, and whether\na compile is currently expected to succeed.\n\n``compile_ready`` is ``False`` -- with a human-readable string\nappended to ``blockers`` for each contributing reason -- whenever\nany of: no model has been configured *and* dry run is off; ``uv`` is\nnot on ``PATH``; the resolved workspace directory is not writable;\nthis application's own settings file exists but could not be read;\nor an inherited settings file exists but could not be parsed.\nOtherwise ``compile_ready`` is ``True`` and ``blockers`` is empty.\n\nEvery message here is written for someone who has only ever seen this\napplication: they name this application's own controls (\"Model settings\",\n\"Dry run mode\") rather than a file or variable belonging to something\nelse. The inherited configuration is still read -- a user who has one\nkeeps working exactly as before -- but it is never presented as a\nrequirement.",
         "operationId": "get_health_api_health_get",
         "responses": {
           "200": {
@@ -278,6 +278,106 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ModelsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/settings": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Get Settings",
+        "description": "Everything the model-settings screen renders.\n\nReads the file fresh: a user can edit ``workspace/settings.json`` (or flip\nthe dry-run switch from another tab) between two requests.",
+        "operationId": "get_settings_api_settings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Put Settings",
+        "description": "Save the in-app model configuration and/or the dry-run switch.\n\nValidation happens before anything is written, so a rejected submission\nleaves the previous configuration exactly as it was. On success the\ncredential is published into this server's environment immediately (see\n:func:`swarm_builder.runtime.publish_secrets`), which is what makes the\nchange take effect for the next generate/compile/run without a restart.\n\nRaises:\n    HTTPException: 422 with every problem found, or 500 when the settings\n        file cannot be written (an unwritable workspace).",
+        "operationId": "put_settings_api_settings_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the submitted provider/model/key combination is not usable"
+          },
+          "500": {
+            "description": "the settings file could not be written"
+          }
+        }
+      }
+    },
+    "/api/settings/test": {
+      "post": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Test Connection",
+        "description": "Make one minimal model call and report whether it worked.\n\nA brand-new user's first question is \"did I paste the key correctly?\", and\nthe honest answer requires a real call -- the keyless validation gate a\ncompile runs cannot answer it, because it injects a test model on purpose.\n\nEvery provider-side outcome (a refused key, a timeout, an unmappable\nroute, nothing configured at all) is a ``200`` with ``ok: false`` and a\nhuman-readable ``detail``; only a structurally invalid request is a\n``422``. Nothing here is persisted: testing an unsaved form must not\nchange the saved configuration.",
+        "operationId": "test_connection_api_settings_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestConnectionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1175,6 +1275,10 @@
           },
           "model": {
             "$ref": "#/components/schemas/GenerateModelOut"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "title": "Dryrun"
           }
         },
         "type": "object",
@@ -1182,7 +1286,8 @@
           "graph",
           "warnings",
           "attempts",
-          "model"
+          "model",
+          "dryRun"
         ],
         "title": "GenerateGraphResponse"
       },
@@ -1370,6 +1475,33 @@
             },
             "type": "array",
             "title": "Runblockers"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "title": "Dryrun"
+          },
+          "dryRunForcedByEnv": {
+            "type": "boolean",
+            "title": "Dryrunforcedbyenv"
+          },
+          "modelConfigured": {
+            "type": "boolean",
+            "title": "Modelconfigured"
+          },
+          "appConfigPath": {
+            "type": "string",
+            "title": "Appconfigpath"
+          },
+          "appConfigError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Appconfigerror"
           }
         },
         "type": "object",
@@ -1387,7 +1519,12 @@
           "compileReady",
           "blockers",
           "runReady",
-          "runBlockers"
+          "runBlockers",
+          "dryRun",
+          "dryRunForcedByEnv",
+          "modelConfigured",
+          "appConfigPath",
+          "appConfigError"
         ],
         "title": "HealthResponse",
         "description": "The full ``GET /api/health`` response body."
@@ -1486,6 +1623,69 @@
         "title": "ModelInfoOut",
         "description": "One entry of a route's explicit model list, as the picker sees it."
       },
+      "ModelInput": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseurl"
+          },
+          "apiKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Apikey"
+          },
+          "clearApiKey": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clearapikey"
+          },
+          "reasoningEffort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoningeffort"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "model"
+        ],
+        "title": "ModelInput",
+        "description": "One provider/model/key submission.\n\nAn omitted ``api_key`` keeps the stored key when the provider is\nunchanged; ``clear_api_key`` removes it; a non-empty ``api_key`` replaces\nit (:func:`swarm_builder.appconfig.apply_update`)."
+      },
       "ModelSelection": {
         "properties": {
           "provider": {
@@ -1526,6 +1726,16 @@
             "type": "array",
             "title": "Routes"
           },
+          "appRoute": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RouteOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "resolvedDefault": {
             "$ref": "#/components/schemas/ResolvedDefaultOut"
           },
@@ -1544,11 +1754,12 @@
         "type": "object",
         "required": [
           "routes",
+          "appRoute",
           "resolvedDefault",
           "settingsError"
         ],
         "title": "ModelsResponse",
-        "description": "The full ``GET /api/models`` response body."
+        "description": "The full ``GET /api/models`` response body.\n\n``app_route`` is the route configured in Swarm Builder's *own* model\nsettings, classified exactly like an inherited one, so a picker can list\nit first with the same enable/disable treatment. It is reported\nseparately from ``routes`` rather than merged into it because the two\nhave different lifetimes: a harness route exists because someone edited a\nmachine-wide file, while this one exists because the user configured it\nin this application."
       },
       "NodeIo": {
         "properties": {
@@ -1691,6 +1902,96 @@
         "type": "object",
         "title": "ProgrammaticSpec",
         "description": "Present on ``kind=\"programmatic\"`` nodes: plain-Python steps with\nno agent. ``needs`` are extra package requirements the scaffolder\nunions into the generated ``pyproject.toml``; ``signature_hint`` is\nfree-text guidance the fill agent reads (never executed or parsed)."
+      },
+      "ProviderOut": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "requiresApiKey": {
+            "type": "boolean",
+            "title": "Requiresapikey"
+          },
+          "requiresBaseUrl": {
+            "type": "boolean",
+            "title": "Requiresbaseurl"
+          },
+          "apiKeyEnv": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Apikeyenv"
+          },
+          "defaultModel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Defaultmodel"
+          },
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "usable": {
+            "type": "boolean",
+            "title": "Usable"
+          },
+          "unusableReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unusablereason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "requiresApiKey",
+          "requiresBaseUrl",
+          "apiKeyEnv",
+          "defaultModel",
+          "models",
+          "note",
+          "usable",
+          "unusableReason"
+        ],
+        "title": "ProviderOut",
+        "description": "One entry of the provider catalog the settings screen renders."
       },
       "ResolvedDefaultOut": {
         "properties": {
@@ -1951,6 +2252,11 @@
             "title": "Compiled",
             "default": false
           },
+          "dryRun": {
+            "type": "boolean",
+            "title": "Dryrun",
+            "default": false
+          },
           "nodes": {
             "additionalProperties": {
               "$ref": "#/components/schemas/NodeRunRecord"
@@ -1968,6 +2274,66 @@
         ],
         "title": "RunRecord",
         "description": "One persisted run."
+      },
+      "SavedModelOut": {
+        "properties": {
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseurl"
+          },
+          "reasoningEffort": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoningeffort"
+          },
+          "hasApiKey": {
+            "type": "boolean",
+            "title": "Hasapikey"
+          },
+          "apiKeyHint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Apikeyhint"
+          }
+        },
+        "type": "object",
+        "required": [
+          "provider",
+          "model",
+          "baseUrl",
+          "reasoningEffort",
+          "hasApiKey",
+          "apiKeyHint"
+        ],
+        "title": "SavedModelOut",
+        "description": "The saved model, minus the secret.\n\n``api_key_hint`` is the last four characters of the stored key -- enough\nfor a user to tell two keys apart, not enough to use one. The value itself\nis never part of any response body."
       },
       "SeqEdge": {
         "properties": {
@@ -2010,6 +2376,122 @@
         ],
         "title": "SeqEdge",
         "description": "A plain sequential edge: ``builder.add_edge(source, target)``."
+      },
+      "SettingsResponse": {
+        "properties": {
+          "configPath": {
+            "type": "string",
+            "title": "Configpath"
+          },
+          "configError": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Configerror"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SavedModelOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dryRun": {
+            "type": "boolean",
+            "title": "Dryrun"
+          },
+          "dryRunForcedByEnv": {
+            "type": "boolean",
+            "title": "Dryrunforcedbyenv"
+          },
+          "dryRunEnvVars": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Dryrunenvvars"
+          },
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderOut"
+            },
+            "type": "array",
+            "title": "Providers"
+          },
+          "resolvedDefault": {
+            "$ref": "#/components/schemas/ResolvedDefaultOut"
+          },
+          "inheritedRoutes": {
+            "type": "integer",
+            "title": "Inheritedroutes"
+          },
+          "workspaceWritable": {
+            "type": "boolean",
+            "title": "Workspacewritable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "configPath",
+          "configError",
+          "model",
+          "dryRun",
+          "dryRunForcedByEnv",
+          "dryRunEnvVars",
+          "providers",
+          "resolvedDefault",
+          "inheritedRoutes",
+          "workspaceWritable"
+        ],
+        "title": "SettingsResponse",
+        "description": "The full ``GET /api/settings`` body."
+      },
+      "SettingsUpdateRequest": {
+        "properties": {
+          "model": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelInput"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "dryRun": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dryrun"
+          },
+          "clearModel": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clearmodel"
+          }
+        },
+        "type": "object",
+        "title": "SettingsUpdateRequest",
+        "description": "Body of ``PUT /api/settings``.\n\n``None`` means \"leave this alone\", which is what lets the dry-run switch be\ntoggled without resubmitting the model form (and vice versa). Removing the\nin-app model entirely is the explicit ``clear_model`` flag rather than an\nambiguous ``model: null``."
       },
       "StartCompileRequest": {
         "properties": {
@@ -2075,12 +2557,17 @@
           "willCompile": {
             "type": "boolean",
             "title": "Willcompile"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "title": "Dryrun"
           }
         },
         "type": "object",
         "required": [
           "runId",
-          "willCompile"
+          "willCompile",
+          "dryRun"
         ],
         "title": "StartRunResponse"
       },
@@ -2383,6 +2870,93 @@
         ],
         "title": "TemplateEntryOut",
         "description": "The five picker-facing fields of one template catalog entry.\n\n``deps`` and ``file_manifest`` are internal scaffolding concerns the\npicker has no use for, so they are deliberately not exposed."
+      },
+      "TestConnectionRequest": {
+        "properties": {
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "baseUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baseurl"
+          },
+          "apiKey": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Apikey"
+          }
+        },
+        "type": "object",
+        "title": "TestConnectionRequest",
+        "description": "Body of ``POST /api/settings/test`` -- all fields optional.\n\nAnything omitted falls back to the saved configuration, so the common\ncase (``{}``) tests exactly what a compile would use. Supplying fields is\nhow the screen tests an unsaved form."
+      },
+      "TestConnectionResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "latencyMs": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latencyms"
+          },
+          "model": {
+            "type": "string",
+            "title": "Model"
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "detail",
+          "latencyMs",
+          "model"
+        ],
+        "title": "TestConnectionResponse",
+        "description": "The result of one test call.\n\nA provider refusing the key, timing out, or being unreachable are all\n*results*, not HTTP errors: the screen shows the detail inline next to the\nform the user needs to fix."
       },
       "ValidationError": {
         "properties": {

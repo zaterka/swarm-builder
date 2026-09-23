@@ -11,9 +11,16 @@ interface GeneratePanelProps {
   replaceGraphId?: string;
   /** Name to keep when replacing; ignored for a new graph. */
   keepName?: string;
-  onGenerated: (graph: SwarmGraph, warnings: FindingOut[], attempts: number) => void;
+  onGenerated: (
+    graph: SwarmGraph,
+    warnings: FindingOut[],
+    attempts: number,
+    dryRun?: boolean,
+  ) => void;
   onCancel?: () => void;
   compact?: boolean;
+  /** Bumped by the shell after a settings save, to re-read health. */
+  settingsRevision?: number;
 }
 
 interface GenerateFailure {
@@ -44,17 +51,28 @@ function readFailure(err: unknown): GenerateFailure {
  * model's draft; this panel only collects the text, shows progress, and
  * hands the saved document to the caller.
  */
-export function GeneratePanel({ replaceGraphId, keepName, onGenerated, onCancel, compact = false }: GeneratePanelProps) {
+export function GeneratePanel({
+  replaceGraphId,
+  keepName,
+  onGenerated,
+  onCancel,
+  compact = false,
+  settingsRevision = 0,
+}: GeneratePanelProps) {
   const [description, setDescription] = useState('');
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<GenerateFailure | null>(null);
   const [health, setHealth] = useState<HealthResponse | null>(null);
 
   useEffect(() => {
-    api.health().then(setHealth).catch(() => setHealth(null));
-  }, []);
+    api
+      .health()
+      .then(setHealth)
+      .catch(() => setHealth(null));
+  }, [settingsRevision]);
 
-  const modelConfigured = health ? health.resolvedModel.source !== 'bundle-default' : true;
+  const modelConfigured = health ? health.modelConfigured || health.dryRun : true;
+  const dryRun = health?.dryRun ?? false;
   const canGenerate = description.trim().length > 0 && !busy && modelConfigured;
 
   const handleGenerate = async () => {
@@ -70,7 +88,7 @@ export function GeneratePanel({ replaceGraphId, keepName, onGenerated, onCancel,
         name: replaceGraphId ? keepName ?? null : null,
         modelOverride: null,
       });
-      onGenerated(response.graph, response.warnings, response.attempts);
+      onGenerated(response.graph, response.warnings, response.attempts, response.dryRun);
       setDescription('');
     } catch (err) {
       setFailure(readFailure(err));
@@ -112,11 +130,14 @@ export function GeneratePanel({ replaceGraphId, keepName, onGenerated, onCancel,
         )}
         {health && (
           <span className="sb-hint">
-            {modelConfigured
-              ? `${health.resolvedModel.provider} / ${health.resolvedModel.model}`
-              : 'No model route configured — set agent-default-model or SWARM_MODEL.'}
+            {dryRun
+              ? 'Dry run: drafts come from the built-in stub, not a model.'
+              : modelConfigured
+                ? `${health.resolvedModel.provider} / ${health.resolvedModel.model}`
+                : 'No model configured yet.'}
           </span>
         )}
+
       </div>
       {busy && (
         <div className="sb-hint" aria-live="polite">

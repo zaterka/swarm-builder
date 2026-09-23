@@ -55,6 +55,7 @@ from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEvent
 
+from swarm_builder import runtime
 from swarm_builder.config import get_dsh_home, get_workspace_dir
 from swarm_builder.models import SwarmGraph
 from swarm_builder.routes.graphs import _load_graph_or_http_error
@@ -708,9 +709,16 @@ async def _run_job(
         compile_id: The job's id.
         workspace_dir: The workspace root, for the project directory.
     """
+    # Frozen here, at job start, and passed explicitly: a user toggling the
+    # switch mid-compile must not get a project that is half stub and half real.
+    dry_run = runtime.dry_run_active()
+
     try:
         run_compile = _load_run_compile()
-        filler = _load_filler()
+        # In dry run the model-backed filler is never selected, so it is not
+        # loaded: requiring the provider packages (or a credential) for a job
+        # that will not call a model would refuse work that can succeed.
+        filler = None if dry_run else _load_filler()
     except HTTPException as exc:
         registry.mark_failed(compile_id, _PipelineUnavailableError(str(exc.detail)))
         return
@@ -724,6 +732,7 @@ async def _run_job(
         filler=filler,
         target=target,
         langgraph_project_dir=langgraph_project_dir(workspace_dir, graph.id),
+        dry_run=dry_run,
     )
 
 

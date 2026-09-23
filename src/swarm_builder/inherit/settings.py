@@ -21,6 +21,17 @@ with ``extra="forbid"`` the way :mod:`swarm_builder.models` does for the
 graph document (that document is *this app's* schema; this file is
 someone else's).
 
+**Inheritance is no longer the only source -- it is the advanced one.**
+:func:`resolve_effective_model` also consults Swarm Builder's *own* model
+settings (``<workspace>/settings.json``, :mod:`swarm_builder.appconfig`),
+which is what the in-app provider picker writes. That layer sits *above* the
+inherited file in the precedence order: a provider and key a user selected in
+this application by hand is a more specific statement of intent than a
+machine-wide default, and requiring the harness to be installed at all was
+exactly the friction this layer removes. The inherited file remains fully
+supported for users who have one -- it simply is not the first thing asked
+for any more, and no user-facing message may present it as required.
+
 **Why nothing here is ever cached.** ``settings.yaml`` is hot-reloaded
 and user-editable -- a user can change their default model between two
 compiles in the same running server process. Every public function in
@@ -63,13 +74,15 @@ concrete failure shapes motivate :func:`_coerce_str`:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 import yaml
 
 from swarm_builder import config
+from swarm_builder.appconfig import AppConfig, AppModelConfig, strip_userinfo
+from swarm_builder.providers import PROVIDERS_BY_KEY
 
 # ---------------------------------------------------------------------------
 # Data shapes
@@ -176,6 +189,16 @@ class EffectiveModel:
     spent: a compile must never silently spend credentials on a route the
     user did not expect, so the resolution path is part of the result
     rather than an implementation detail.
+
+    ``api_key`` is the one field that holds a secret: the literal credential a
+    user typed into this application's own model settings
+    (``<workspace>/settings.json``). It lives here because the structural
+    emission path must hand PydanticAI an explicit key and because the same
+    value is published into the environment a run subprocess inherits. It is
+    declared ``repr=False`` and must never be embedded in a response model, an
+    event payload or a generated project -- only
+    ``runtime.secret_env_overrides`` and the settings screen's four-character
+    hint may read it.
     """
 
     provider: str
@@ -183,8 +206,11 @@ class EffectiveModel:
     reasoning_effort: str | None
     base_url: str | None
     api_key_env: str | None
-    source: Literal["graph-override", "settings-default", "env-fallback", "bundle-default"]
+    source: Literal[
+        "graph-override", "app-config", "settings-default", "env-fallback", "bundle-default"
+    ]
     route: RouteConfig | None
+    api_key: str | None = field(default=None, repr=False)
 
 
 #: The last-resort selection: when neither a graph override, a
@@ -410,15 +436,84 @@ def _find_route(routes: tuple[RouteConfig, ...], provider: str) -> RouteConfig |
     return next((route for route in routes if route.key == provider), None)
 
 
+def route_for_app_model(model: AppModelConfig) -> RouteConfig:
+    """Synthesize the :class:`RouteConfig` an in-app model selection implies.
+
+    A model configured in the application's own settings file describes the
+    same things a harness route does -- a protocol, a base URL, the name of
+    the variable holding its key -- so it is expressed as a
+    :class:`RouteConfig` rather than as a fourth parallel shape. Everything
+    downstream then works unchanged: :func:`~swarm_builder.inherit.routes.classify_route`
+    classifies it, ``_resolve_emission`` decides its emission path, and
+    Phase 5's static extras assertion checks the project it produced.
+
+    The ``api`` value comes from the provider registry, which is what keeps
+    the emission decision each provider gets in exactly one place: a curated
+    provider declares a protocol (``anthropic-messages``,
+    ``bedrock-converse-stream``, …), while the custom OpenAI-compatible
+    endpoint leaves it unset so the structural ``OpenAIChatModel`` path is
+    taken for its required ``base_url``.
+
+    A ``base_url`` is only ever carried for a provider whose spec requires one
+    (``validate_model_config`` rejects it otherwise), and any embedded
+    credentials are stripped: this route's ``base_url`` is rendered verbatim
+    into a generated project's ``deps.py`` and ``.env.example``.
+    """
+    spec = PROVIDERS_BY_KEY.get(model.provider)
+    base_url = None
+    api = None
+    api_key_env = None
+    if spec is not None:
+        api = spec.api
+        api_key_env = spec.api_key_env
+        if spec.requires_base_url:
+            base_url = strip_userinfo(model.base_url)
+    return RouteConfig(
+        key=model.provider,
+        api=api,
+        base_url=base_url,
+        api_key_env=api_key_env,
+        aws_profile=None,
+        aws_region=None,
+        models=(),
+    )
+
+
+def _usable_app_model(app_config: AppConfig | None) -> AppModelConfig | None:
+    """The in-app model this resolution may use, or ``None``.
+
+    Three states produce ``None``, all of them deliberately equivalent to "no
+    in-app route": the file is absent (the normal fresh-install state), the
+    file could not be read (reported by the health check/`settings` screen, so
+    resolution must not crash on it), or the entry it holds does not actually
+    describe a usable route -- an unknown provider, a blank model id, a
+    malformed base URL.
+
+    That last case matters: an invalid entry that *won* the precedence chain
+    would shadow a perfectly good inherited or environment configuration and
+    fail every compile with an unmappable-route error, which is a worse outcome
+    than the fallthrough. ``/api/settings`` and ``/api/health`` report the
+    problems in their own right, so the user still learns what is wrong.
+    """
+    if app_config is None or app_config.error is not None or app_config.model is None:
+        return None
+    from swarm_builder.appconfig import validate_model_config
+
+    if validate_model_config(app_config.model):
+        return None
+    return app_config.model
+
+
 def resolve_effective_model(
     dsh_home: Path,
     graph_override: tuple[str, str, str | None] | None = None,
+    app_config: AppConfig | None = None,
 ) -> EffectiveModel:
     """Resolve which model a compile will actually spend.
 
     Re-reads ``settings.yaml`` fresh on every call via :func:`read_settings`
-    (never cached, for the same hot-reload reason that function documents)
-    and applies this exact precedence:
+    (never cached, for the same hot-reload reason that function documents) and
+    applies this exact precedence:
 
     1. ``graph_override``, if not ``None`` -- a ``(provider, model,
        reasoning_effort)`` tuple standing in for a graph's own
@@ -430,16 +525,30 @@ def resolve_effective_model(
        naming an unconfigured provider still wins; only ``route`` (and
        therefore ``base_url``/``api_key_env``) come back empty in that
        case.
-    2. Else the settings file's ``agent-default-model`` section, when
+    2. Else the application's **own** model settings
+       (``<workspace>/settings.json``, via
+       :func:`swarm_builder.appconfig.load_config`): a provider, model id
+       and optional key the user chose in the UI. ``source="app-config"``.
+       This outranks the inherited file and the environment deliberately:
+       a route the user selected in this application by hand is a more
+       recent and more specific statement of intent than a machine-wide
+       default. ``app_config=None`` means "read the file"; passing an
+       explicit :class:`~swarm_builder.appconfig.AppConfig` (including an
+       empty one) is how a caller states what the file contains without
+       touching the disk. A read failure (``AppConfig.error``) is treated
+       exactly like "nothing configured here" -- the health check reports
+       the broken file in its own right, and resolution must not crash
+       because of it.
+    3. Else the settings file's ``agent-default-model`` section, when
        :func:`read_settings` returned a :class:`Settings` with
        ``agent_default_model`` set (which requires the file to be
        present, parse without ``error``, and have the section).
        ``source="settings-default"``. A settings read that came back
        ``None`` (file absent) or with ``error`` set is treated the same
        as "no settings default available" here -- resolution simply
-       falls through to step 3, it never raises and never treats a
+       falls through to step 4, it never raises and never treats a
        broken settings file as if it were a configured empty default.
-    3. Else the ``SWARM_MODEL`` env var (via
+    4. Else the ``SWARM_MODEL`` env var (via
        ``config.get_swarm_model()``, which already normalizes an unset
        or empty string to ``None``), if set. ``source="env-fallback"``,
        ``route=None`` always (there is no settings route corresponding
@@ -454,19 +563,42 @@ def resolve_effective_model(
          provider/model for reporting purposes only. No ``:`` at all,
          or an empty provider before the first ``:`` (e.g.
          ``":foo"``), both report ``provider="env"``.
-    4. Else the bundle default -- ``source="bundle-default"``,
+    5. Else the bundle default -- ``source="bundle-default"``,
        ``route=None``, ``base_url=None``, ``api_key_env=None``,
        ``provider="deepseek-official"``, ``model="deepseek-v4-flash"``,
        ``reasoning_effort=None``. That exact pair is pinned in
        :data:`_BUNDLE_DEFAULT_PROVIDER`/:data:`_BUNDLE_DEFAULT_MODEL` and
-       must never be substituted.
+       must never be substituted. It is an internal offline stand-in: no
+       user-facing message may quote it as if the user had chosen it.
+
+    Whichever step wins supplies the *whole* selection -- provider, model,
+    base URL, key and key variable together. Fields are never merged across
+    sources, because a pair that no single source declares (a provider from
+    one and a model id from another) is exactly the silent mis-routing this
+    function exists to make impossible.
     """
     settings = read_settings(dsh_home)
     routes = settings.routes if settings is not None and settings.error is None else ()
 
+    if app_config is None:
+        from swarm_builder.appconfig import load_config
+
+        app_config = load_config()
+
+    app_model = _usable_app_model(app_config)
+
     if graph_override is not None:
         provider, model, reasoning_effort = graph_override
         route = _find_route(routes, provider)
+        api_key = None
+        if route is None and app_model is not None and app_model.provider == provider:
+            # The override names the provider configured in the app, which has
+            # no entry in the inherited settings file. Without this fallback a
+            # graph override to a custom endpoint the user configured in the UI
+            # would resolve with no base URL and no key, and be refused as
+            # unmappable even though the app is configured perfectly well.
+            route = route_for_app_model(app_model)
+            api_key = app_model.api_key
         return EffectiveModel(
             provider=provider,
             model=model,
@@ -475,6 +607,20 @@ def resolve_effective_model(
             api_key_env=route.api_key_env if route is not None else None,
             source="graph-override",
             route=route,
+            api_key=api_key,
+        )
+
+    if app_model is not None:
+        route = route_for_app_model(app_model)
+        return EffectiveModel(
+            provider=app_model.provider,
+            model=app_model.model,
+            reasoning_effort=app_model.reasoning_effort,
+            base_url=route.base_url,
+            api_key_env=route.api_key_env,
+            source="app-config",
+            route=route,
+            api_key=app_model.api_key,
         )
 
     default = (

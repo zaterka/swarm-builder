@@ -11,11 +11,13 @@ gaps with a PydanticAI coding agent and produces a runnable
 [`pydantic-graph`](https://ai.pydantic.dev/graph/) project on disk — then proves
 it imports and runs.
 
-It is a standalone Python + React application. It optionally *reads*
+It is a standalone Python + React application. You configure its model in the
+app itself — pick a provider, paste a key, test it — and can turn on dry run to
+work with no credentials at all. It *optionally* also reads
 [DeepSeek Harness](https://github.com/deepseek-ai) settings
-(`$DSH_HOME/settings.yaml`) to **inherit your configured model routes** — the
-model picker shows which route a compile will spend — but it does not spawn or
-depend on `dsh`, and it works fully with the harness absent.
+(`$DSH_HOME/settings.yaml`) to **inherit** an existing set of model routes, but
+it does not spawn or depend on `dsh`, it never requires that file, and it works
+fully with the harness absent.
 
 | Document | What it covers |
 |---|---|
@@ -102,8 +104,9 @@ by the console script.
 
 ### The fastest way to compile with no credentials at all
 
-`SWARM_FAKE_FILL=1` runs the entire pipeline with **no model, no credentials,
-and no `$DSH_HOME` at all**. The stub bodies are derived from each node's
+The in-app **Dry run mode** switch does this for you; `SWARM_FAKE_FILL=1` is
+the same thing for a CI job or a container, and runs the entire pipeline with
+**no model, no credentials, and no `$DSH_HOME` at all**. The stub bodies are derived from each node's
 declared port types, so a stub-filled project genuinely passes the keyless
 validation gate — `uv sync`, keyless import, graph build, the `render()`
 golden, and the `TestModel` dry run.
@@ -112,6 +115,18 @@ That makes it the right way to exercise the pipeline itself. A *real* compile
 needs a resolvable route — see
 [Configuring the model](#configuring-the-model) — and differs only in Phase 3:
 the bodies come from the model instead of the stub.
+
+### Running a generated project outside Swarm Builder
+
+A generated project has no dependency on Swarm Builder, so it also needs its
+own credential when you run it somewhere else: its `.env.example` names the
+variable to set (the *name*, never the key value).
+
+Removing or replacing the key in Model settings **does** retract the variable
+the app itself published into the running server's environment, so a run
+started afterwards cannot authenticate with a credential you revoked. A
+variable you exported yourself (in a shell, a `.env` file, or a container) is
+left exactly as it is: that one was never the app's to unset.
 
 ```bash
 export UV_CACHE_DIR="$(pwd)/.uv-cache"
@@ -219,12 +234,67 @@ in-flight compile rather than orphaning it.
 
 ## Configuring the model
 
-Swarm Builder never pins a model of its own. There are two supported paths,
+Swarm Builder never pins a model of its own. There are three supported paths,
 and `/api/health`'s `resolvedModel.source` field always tells you which one
-produced the current answer — `graph-override`, `settings-default`,
-`env-fallback`, or `bundle-default`.
+produced the current answer — `graph-override`, `app-config`,
+`settings-default`, `env-fallback`, or `bundle-default`.
 
-### Path A — inherit from the harness (preferred when the harness is installed)
+### Path A — configure it in the app (the normal way)
+
+Both screens carry a **Model settings** button in their top bar, next to a
+summary of the model in use and a `DRY RUN` chip when dry run is on — so what
+**Describe your workflow** is about to spend is visible without opening
+anything. When something needs doing, the start screen also shows a notice in
+the page body with the remedy: **Set up a model** (nothing configured yet),
+**Add a key** (a credential is what is missing), or **Fix in Model settings**
+(the settings file could not be read).
+
+Fill in the form:
+
+1. **Provider** — OpenAI, Anthropic, DeepSeek, Google Gemini, Groq, Mistral,
+   Amazon Bedrock, or *Custom OpenAI-compatible endpoint* (which asks for a
+   base URL: vLLM, Ollama, LM Studio, OpenRouter, a corporate gateway).
+2. **Model** — exactly one id is ever sent, and the field is pre-filled with a
+   current model for the provider you pick (OpenAI `gpt-6-astra`, Anthropic
+   `claude-sonnet-5`, DeepSeek `deepseek-v4-flash`, …). The suggestions are
+   drawn from the installed `pydantic-ai`'s own model list, so a suggestion is
+   always a real model name; any other id the provider accepts works too.
+3. **API key** — stored in `workspace/settings.json` with owner-only
+   permissions, inside the git-ignored workspace directory. It is published
+   into the server process's environment under the provider's own variable
+   name (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, …), which is how the compile
+   agent, the run subprocess and a generated project pick it up. **It is never
+   returned by any endpoint** — the screen shows only that a key is stored and
+   its last four characters — and it is never written into a generated
+   project.
+4. **Test connection** — one small real call, so you learn whether the key
+   works before spending a whole compile on it.
+
+Changing the base URL of the custom endpoint requires re-entering the key:
+the credential must never follow a changed URL to a different host.
+
+Saving takes effect immediately: no restart, no file to edit. Commands below
+that read the model state (`/api/health`, `/api/models`) show the result as
+`source: app-config`.
+
+Leaving the key field empty is legitimate: the server then uses the
+provider's own variable from its environment (an exported `OPENAI_API_KEY`, a
+`.env` file, a container secret). `GET /api/health`'s `run_ready` and the Test
+button tell you whether a usable credential is actually present.
+
+### Dry run mode
+
+The same screen has one switch: **Dry run mode**. With it on, describe and
+compile use deterministic stubs and runs use a keyless test model, so the
+whole pipeline works with **no provider, no key and no account** — and the app
+badges every screen `DRY RUN` so stub output is never mistaken for real
+output. The switch is persisted in `workspace/settings.json`, applies to the
+next request without a restart, and is locked (with an explanation) when one
+of `SWARM_FAKE_FILL`, `SWARM_FAKE_GENERATE` or `SWARM_RUN_TEST_MODEL` is set
+in the environment: an offline or CI run that silently spent real credentials
+would be a worse surprise than a switch that cannot be turned off.
+
+### Path B — inherit from the harness (advanced, optional)
 
 Read `$DSH_HOME/settings.yaml` (default `~/.dsh/settings.yaml`). Two sections
 matter, everything else in that file is ignored:
@@ -282,9 +352,9 @@ Check what was picked up, without a browser:
 curl -s http://127.0.0.1:8420/api/models | python3 -m json.tool
 ```
 
-### Path B — set `SWARM_MODEL` (the harness-absent path)
+### Path C — set `SWARM_MODEL`
 
-For a machine with no harness at all, or to override the inherited route for
+For a machine with no harness at all, or to override the configured route for
 one shell:
 
 ```bash
@@ -308,10 +378,13 @@ reads, so one `.env` serves both. Provider keys such as `DEEPSEEK_API_KEY` or
 `OPENAI_API_KEY` belong there too — the fill agent, **Describe → generate**
 and every **Run** subprocess read them from the server's environment.
 
-`SWARM_MODEL` is only consulted when no `agent-default-model` is inherited, so
-the precedence is: **graph override → `agent-default-model` →
-`SWARM_MODEL` → bundle default** (`deepseek-official` / `deepseek-v4-flash`,
-reported with `source: "bundle-default"` and treated as *not configured*).
+`SWARM_MODEL` is only consulted when nothing else is configured, so the
+precedence is: **graph override → the model saved in Model settings
+(`app-config`) → `agent-default-model` → `SWARM_MODEL` → built-in offline
+default** (`deepseek-official` / `deepseek-v4-flash`, reported with
+`source: "bundle-default"` and treated as *not configured*). Whichever source
+wins supplies the whole selection — provider, model, endpoint and key together
+— so a pair no single source declares can never be resolved.
 
 ### Per-workflow override
 
@@ -625,7 +698,8 @@ creates the file, so a recompile cannot leave a stale one behind.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DSH_HOME` | `~/.dsh` | Where to look for `settings.yaml` to inherit model routes. Absent is a normal state. |
+| `SWARM_CONFIG` | `<workspace>/settings.json` | Where the app's **own** model settings live: the provider, model id, API key and the dry-run switch chosen in **Model settings**. Owner-only (`0600`) and inside the git-ignored workspace. Absent is a normal state. |
+| `DSH_HOME` | `~/.dsh` | Where to look for `settings.yaml` to *inherit* model routes from an existing harness configuration. Absent is a normal state, and never required. |
 | `SWARM_WORKSPACE` | `<repo>/workspace` | Where saved graphs and generated projects live. |
 | `PORT` | `8420` | Port the console script binds on. |
 | `SWARM_HOST` | `127.0.0.1` | Interface the console script binds on. Loopback is a deliberate security default — the server has no auth. Only the container sets `0.0.0.0`, because a loopback bind inside a container is unreachable through a published port; the Compose file re-establishes the restriction by publishing to host loopback. |
@@ -633,9 +707,9 @@ creates the file, so a recompile cannot leave a stale one behind.
 | `SWARM_MODEL` | *(none)* | Fallback model when no route is inherited: a PydanticAI known name, or a bare id paired with `SWARM_BASE_URL`. |
 | `SWARM_BASE_URL` | *(none)* | Custom OpenAI-compatible endpoint for a `SWARM_MODEL` that is not a known name. |
 | `SWARM_API_KEY_ENV` | *(none)* | *Name* of the environment variable holding that endpoint's key. The key value itself is never written to disk. |
-| `SWARM_FAKE_FILL` | *(none)* | `1` replaces Phase 3 with a deterministic stub fill: no model, no credentials, no `$DSH_HOME`. |
-| `SWARM_FAKE_GENERATE` | *(none)* | `1` replaces the model in **Describe → generate** with a deterministic sentence-per-step draft. |
-| `SWARM_RUN_TEST_MODEL` | *(none)* | `1` makes a **Run** execute the generated project against a keyless `TestModel` instead of the real model — for exercising the run plumbing, never for real output. |
+| `SWARM_FAKE_FILL` | *(none)* | `1` selects the deterministic stub fill instead of the model: no credentials needed. Also forces the in-app **Dry run mode** switch on (and locks it). |
+| `SWARM_FAKE_GENERATE` | *(none)* | `1` replaces the model in **Describe → generate** with a deterministic sentence-per-step draft. Also forces dry run on. |
+| `SWARM_RUN_TEST_MODEL` | *(none)* | `1` makes a **Run** execute the generated project against a keyless `TestModel` instead of the real model — for exercising the run plumbing, never for real output. Also forces dry run on. |
 
 `.env.example` is a copy-pasteable starting point: copy it to `.env` and the
 console script loads it at startup. Only `swarm-builder` (and `docker
@@ -866,32 +940,31 @@ request — which also means no CORS preflight for the non-safelisted
 `Last-Event-ID` header the SSE client sends on reconnect. **Leave the API on
 port 8420** for this to work, or edit the proxy target to match your `PORT`.
 
-### No model route resolvable — `compileReady: false`
+### No model configured yet — `compileReady: false`
 
 **Symptom**
 
 ```json
 "resolvedModel": { "provider": "deepseek-official", "model": "deepseek-v4-flash", "source": "bundle-default" },
+"modelConfigured": false,
 "compileReady": false,
-"blockers": ["No model route configured: no agent-default-model in settings.yaml and no SWARM_MODEL set. ..."]
+"blockers": ["No model is configured yet. Choose a provider and add your API key in Model settings, or turn on Dry run mode to build and run offline."]
 ```
 
-**Cause** — nothing the user configured resolved: no `agent-default-model`
-section in `$DSH_HOME/settings.yaml` and no `SWARM_MODEL` in the environment,
-so the pinned bundle default applies. `source: "bundle-default"` is the exact
-tell. With the harness absent this is a **normal, expected state**, not a
-crash.
+**Cause** — nothing is configured, so the built-in offline stand-in applies.
+`source: "bundle-default"` (or `modelConfigured: false`) is the exact tell.
+This is the state a fresh clone starts in: a **normal, expected state**, not a
+crash, and the app never presents it in terms of anything outside itself.
 
-**Fix** — either of the two paths above:
+**Fix** — either:
 
-- add an `agent-default-model` section to `$DSH_HOME/settings.yaml` (takes
-  effect immediately, no restart), or
-- `export SWARM_MODEL="bedrock:us.anthropic.claude-opus-5"` and restart the
-  server with it exported.
+- **Model settings → provider → API key → Save**, then **Test connection**; or
+- **Model settings → Dry run mode**, which needs no account at all.
 
-Re-check `/api/health` until `source` reads `settings-default` or
-`env-fallback` and `blockers` is empty. The `blockers` field always names both
-remediations.
+Re-check `/api/health` until `modelConfigured` is `true` (or `dryRun` is `true`)
+and `blockers` is empty. On the advanced path, an `agent-default-model` section
+in `$DSH_HOME/settings.yaml` or `SWARM_MODEL` in the environment also count —
+both are read, but neither is required.
 
 ### An expired AWS SSO token fails the compile
 
@@ -937,17 +1010,21 @@ mappable protocols are `openai-completions` and `openai-responses` →
 refusal is deliberate: the alternative is emitting a project that cannot
 import.
 
-**Fix** — pick a different route in the compile panel's model picker, or set
-the graph's own `model` override, or change the route in `settings.yaml`:
+**Fix** — choose a different provider in **Model settings** (all curated
+providers are usable in-process), or set the graph's own `model` override, or —
+on the inherited path — change the route in `settings.yaml`:
 
-- if the endpoint is OpenAI-compatible, declare `api: openai-completions` and
-  a `baseURL`, which takes the structural path;
+- if the endpoint is OpenAI-compatible, pick *Custom OpenAI-compatible
+  endpoint* in Model settings (which asks for a base URL and takes the
+  structural path), or declare `api: openai-completions` plus a `baseURL` in
+  an inherited route;
 - otherwise use `SWARM_MODEL` with a PydanticAI known name for this compile.
 
-**Also note the extra.** An `anthropic-messages` route needs the `anthropic`
-extra, which this server's own `pyproject.toml` does not pin (it pins
-`pydantic-ai-slim[bedrock,openai]`). `/api/models` reports the missing extra
-in `unmappableReason`. Adding it is a `pyproject.toml` change plus a
+**Also note the extra.** An inherited `anthropic-messages` route needs the
+`anthropic` extra. This server pins
+`pydantic-ai-slim[anthropic,bedrock,google,groq,mistral,openai]` so every
+provider the picker offers can be built in-process; an install that somehow
+lacks one reports it in `/api/models` as `unmappableReason`, and the fix is a
 `uv sync`.
 
 ### `uv sync` fails inside Phase 5
@@ -1170,7 +1247,7 @@ from the failed attempt do not need to be removed by hand.
 ```json
 {
   "code": "unknown_model_name",
-  "message": "the inherited default 'deepseek:deepseek-flash' is not a model name this pydantic-ai knows, so the exported project will fail when run with real credentials even though the keyless gate passes; check the 'deepseek-official' model id in your harness settings",
+  "message": "the default model 'deepseek:deepseek-flash' is not a model name this pydantic-ai knows, so the exported project will fail when run with real credentials even though the keyless gate passes; pick a different model for the 'deepseek-official' provider in Model settings",
   "nodeIds": []
 }
 ```
@@ -1196,8 +1273,10 @@ Only the known-name path can be checked at all. A custom-`baseURL` route names
 a model on someone else's endpoint, so membership in PydanticAI's union says
 nothing about it and no warning is emitted.
 
-**Fix** — correct the model id in `$DSH_HOME/settings.yaml` (or set
-`SWARM_MODEL`), then confirm the route resolution before spending another
+**Fix** — pick a different model in **Model settings** (the curated list is
+drawn from the installed `pydantic-ai`, so those ids are always known), or, on
+the inherited path, correct the model id in `$DSH_HOME/settings.yaml` or set
+`SWARM_MODEL`. Then confirm the route resolution before spending another
 compile:
 
 ```bash

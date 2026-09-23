@@ -142,6 +142,7 @@ describe('runStateFromRecord', () => {
       model: 'm',
       durationMs: 5000,
       compiled: true,
+      dryRun: false,
       nodes: { a: { status: 'succeeded', inputs: 'hi', output: 'out', stateDelta: null, error: null, durationMs: 3 } },
     });
     expect(state.runId).toBe('r1');

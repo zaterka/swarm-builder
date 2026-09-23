@@ -44,8 +44,11 @@ def anyio_backend() -> str:
 def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("SWARM_WORKSPACE", str(tmp_path / "workspace"))
     monkeypatch.setenv("DSH_HOME", str(tmp_path / "dsh_home"))
+    monkeypatch.setenv("SWARM_CONFIG", str(tmp_path / "workspace" / "settings.json"))
     monkeypatch.delenv("SWARM_MODEL", raising=False)
     monkeypatch.delenv("SWARM_FAKE_GENERATE", raising=False)
+    monkeypatch.delenv("SWARM_FAKE_FILL", raising=False)
+    monkeypatch.delenv("SWARM_RUN_TEST_MODEL", raising=False)
     return tmp_path / "workspace"
 
 
@@ -412,12 +415,53 @@ def test_generate_route_can_replace_an_existing_graph_id(
     assert len(client.get(f"/api/graphs/{first['id']}").json()["nodes"]) == 2
 
 
+def test_generate_route_works_in_dry_run_with_no_model_at_all(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A brand-new user who turns the dry-run switch on must be able to
+    describe a workflow with no provider, no key and no environment variable.
+
+    This is the case both of the route's gates used to block: the
+    "nothing configured" 503 and the missing-credential 503.
+    """
+    from swarm_builder.appconfig import AppConfig, save_config
+
+    save_config(AppConfig(dry_run=True), workspace / "settings.json")
+    monkeypatch.delenv("SWARM_FAKE_GENERATE", raising=False)
+
+    response = TestClient(create_app()).post(
+        "/api/graphs/generate", json={"description": "Take a ticket. Classify it. Reply."}
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["dryRun"] is True
+    assert body["graph"]["nodes"]
+    assert body["model"]["source"] == "bundle-default"
+
+
+def test_generate_route_reports_dry_run_false_for_a_real_model(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SWARM_FAKE_GENERATE", "1")
+    response = TestClient(create_app()).post(
+        "/api/graphs/generate", json={"description": "Take a ticket. Classify it. Reply."}
+    )
+    assert response.status_code == 200
+    # ``SWARM_FAKE_GENERATE=1`` is itself a dry-run signal now.
+    assert response.json()["dryRun"] is True
+
+
 def test_generate_route_refuses_when_no_model_is_configured(workspace: Path) -> None:
     _ = workspace
     client = TestClient(create_app())
     response = client.post("/api/graphs/generate", json={"description": "Anything."})
     assert response.status_code == 503
-    assert "No model route configured" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "No model is configured yet" in detail
+    # A brand-new user must be pointed at this application's own controls.
+    for foreign in ("settings.yaml", "DSH_HOME", "agent-default-model", "SWARM_MODEL"):
+        assert foreign not in detail, foreign
 
 
 def test_generate_route_validates_the_description(workspace: Path) -> None:

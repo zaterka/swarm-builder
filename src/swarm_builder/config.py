@@ -59,6 +59,27 @@ def get_workspace_dir() -> Path:
     return REPO_ROOT / "workspace"
 
 
+#: File name of the application's own model settings, inside the workspace.
+APP_CONFIG_FILENAME: str = "settings.json"
+
+
+def get_app_config_path() -> Path:
+    """Where Swarm Builder's own model settings live.
+
+    ``SWARM_CONFIG`` overrides the location wholesale (a test seam, and the
+    escape hatch for a read-only checkout); the default is
+    ``<workspace>/settings.json``, which keeps the app's configuration next to
+    the graphs and projects it applies to and inside the git-ignored
+    ``workspace/`` directory, so a credential written there can never be
+    committed. Absent is a normal state: the app then falls back to the
+    inherited/environment sources exactly as it always has.
+    """
+    raw = os.environ.get("SWARM_CONFIG")
+    if raw:
+        return Path(raw).expanduser()
+    return get_workspace_dir() / APP_CONFIG_FILENAME
+
+
 def get_port() -> int:
     """Port the FastAPI server binds on. See :data:`DEFAULT_HOST` for the
     interface it binds."""

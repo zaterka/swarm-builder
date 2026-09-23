@@ -105,13 +105,28 @@ STDERR_TAIL_LINE_COUNT: int = 40
 #: shell happens to have working credentials exported (mirrors
 #: tests/test_codegen_fixtures.py's reproduce-script env, and fact 7's
 #: "no key" requirement).
+#:
+#: Every variable :func:`swarm_builder.runtime.publish_secrets` can set must
+#: appear here: the in-app model picker publishes the configured provider's
+#: key into this server's own environment, so a variable missing from this
+#: list would let the gate pass on the developer's key instead of on the
+#: generated project's own merits. ``tests/test_providers.py`` asserts that
+#: every provider's variable is covered.
 CREDENTIAL_ENV_VARS_TO_STRIP: tuple[str, ...] = (
     "AWS_PROFILE",
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GOOGLE_API_KEY",
+    "GEMINI_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
     "SWARM_API_KEY",
 )
 

@@ -27,10 +27,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from swarm_builder import __version__
+from swarm_builder import __version__, runtime
 from swarm_builder.config import REPO_ROOT, get_host, get_port, load_env_file
 from swarm_builder.routes import compile as compile_routes
-from swarm_builder.routes import export, generate, graphs, health, llm_routes, runs, templates
+from swarm_builder.routes import (
+    export,
+    generate,
+    graphs,
+    health,
+    llm_routes,
+    runs,
+    settings,
+    templates,
+)
 
 
 @asynccontextmanager
@@ -80,6 +89,7 @@ def create_app() -> FastAPI:
     app.include_router(graphs.router, prefix="/api")
     app.include_router(templates.router, prefix="/api")
     app.include_router(llm_routes.router, prefix="/api")
+    app.include_router(settings.router, prefix="/api")
     app.include_router(export.router, prefix="/api")
     app.include_router(compile_routes.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
@@ -133,6 +143,13 @@ def run() -> None:
     loaded = load_env_file()
     if loaded:
         print(f"Loaded {len(loaded)} variable(s) from .env: {', '.join(loaded)}")
+    # Publish the credential saved in the app's own model settings (if any)
+    # into this process's environment, which is what lets PydanticAI resolve a
+    # known-name model and what every run subprocess inherits. Names only:
+    # the value is never printed.
+    published = runtime.publish_secrets()
+    if published:
+        print(f"Using the API key from Model settings for: {', '.join(published)}")
     host = get_host()
     port = get_port()
     print(f"Swarm Builder listening at http://{host}:{port}")

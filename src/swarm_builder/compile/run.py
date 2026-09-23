@@ -51,11 +51,12 @@ import signal
 import tempfile
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from swarm_builder import runtime
 from swarm_builder.compile.jobs import Job, JobRegistry
 from swarm_builder.compile.scaffold import STREAM_RUN_INPUT_KEY
 from swarm_builder.config import get_uv_cache_dir
@@ -215,6 +216,11 @@ class RunOutcome:
     model: str | None
     compiled: bool
     finished_at: datetime
+    #: Whether this run executed against the generated project's keyless
+    #: ``TestModel`` instead of its real model (dry run). Reported so a UI can
+    #: label stub output as stub output rather than presenting it as a real
+    #: workflow result.
+    dry_run: bool = False
 
 
 #: The compile-first hook a run job is given: ``routes/runs.py`` binds
@@ -314,6 +320,8 @@ async def _execute(
     input_value: object,
     uv_cache_dir: Path,
     timeout_s: float,
+    extra_env: Mapping[str, str] | None = None,
+    dry_run: bool = False,
 ) -> tuple[_TracerState, int]:
     """Spawn the tracer, stream its output into ``job``, and reap it.
 
@@ -325,7 +333,9 @@ async def _execute(
         asyncio.CancelledError: Propagated after the process group is
             killed, so a cancelled run never leaks a child.
     """
-    env = {**os.environ, "UV_CACHE_DIR": str(uv_cache_dir), "PYTHONUNBUFFERED": "1"}
+    env = runtime.child_process_env(
+        uv_cache_dir=uv_cache_dir, extra_env=extra_env, dry_run=dry_run
+    )
     fd, input_path_str = tempfile.mkstemp(prefix="swarm-run-", suffix=".json")
     input_path = Path(input_path_str)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -391,6 +401,7 @@ def _done_payload(outcome: RunOutcome) -> dict[str, object]:
         "durationMs": outcome.duration_ms,
         "model": outcome.model,
         "compiled": outcome.compiled,
+        "dryRun": outcome.dry_run,
         "finishedAt": outcome.finished_at.isoformat(),
     }
 
@@ -405,6 +416,8 @@ async def run_project(
     compile_if_stale: CompileFirst | None,
     uv_cache_dir: Path | None = None,
     timeout_s: float = RUN_TIMEOUT_SECONDS,
+    dry_run: bool | None = None,
+    extra_env: Mapping[str, str] | None = None,
 ) -> RunOutcome:
     """Run ``graph``'s compiled project as the job registered under ``run_id``.
 
@@ -426,6 +439,16 @@ async def run_project(
             a stale project with :class:`ProjectStaleError`.
         uv_cache_dir: Explicit ``UV_CACHE_DIR``; defaults to the env.
         timeout_s: Wall-clock bound for the tracer subprocess.
+        dry_run: Whether the tracer should run against a keyless
+            ``TestModel``. ``None`` reads the application's current state
+            once, here, at job start, and the answer is then passed down to
+            the child process as an environment override -- never re-read, so
+            toggling the switch mid-run cannot change which model a
+            half-finished run is using.
+        extra_env: Extra environment variables for the tracer subprocess,
+            merged last (so a caller's explicit decision wins over an
+            inherited value). Used for the dry-run test model, and available
+            for any future per-run override.
 
     Returns:
         The finished run.
@@ -444,6 +467,16 @@ async def run_project(
     if job.status == "queued":
         job.mark_running()
     resolved_uv_cache_dir = uv_cache_dir if uv_cache_dir is not None else get_uv_cache_dir()
+    if dry_run is None:
+        from swarm_builder import runtime
+
+        dry_run = runtime.dry_run_active()
+    elif not dry_run:
+        from swarm_builder import runtime
+
+        # As in ``run_compile``: an exported ``SWARM_FAKE_*``/``SWARM_RUN_TEST_MODEL``
+        # wins over an explicit "run for real", one-time, at the freeze point.
+        dry_run = runtime.dry_run_forced_by_env()
     started = time.monotonic()
 
     try:
@@ -467,6 +500,8 @@ async def run_project(
             input_value=value,
             uv_cache_dir=resolved_uv_cache_dir,
             timeout_s=timeout_s,
+            extra_env=extra_env,
+            dry_run=dry_run,
         )
         if state.result is None or exit_code != 0:
             raise RunError(_failure_message(state, exit_code))
@@ -482,6 +517,7 @@ async def run_project(
             model=state.model,
             compiled=compiled,
             finished_at=datetime.now(UTC),
+            dry_run=dry_run,
         )
         payload = _done_payload(outcome)
         job.append_event("done", payload)

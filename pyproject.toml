@@ -9,7 +9,11 @@ dependencies = [
     "uvicorn==0.53.0",
     "sse-starlette==3.4.11",
     "pyyaml==6.0.3",
-    "pydantic-ai-slim[bedrock,openai]==2.43.0",
+    # Every provider the in-app model picker offers must be constructible by
+    # THIS server's own interpreter: the compile agent, the generator and the
+    # "Test connection" button all build a live model in-process. A generated
+    # project declares its own extras independently (see inherit/routes.py).
+    "pydantic-ai-slim[anthropic,bedrock,google,groq,mistral,openai]==2.43.0",
     "langgraph==1.2.12",
     "langchain==1.4.2",
 ]

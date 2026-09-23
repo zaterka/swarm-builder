@@ -609,8 +609,19 @@ def _review_problems(findings: Sequence[Finding]) -> list[str]:
 
 
 def fake_generate_enabled() -> bool:
-    """Whether ``SWARM_FAKE_GENERATE=1`` is set (read per call, never cached)."""
-    return os.environ.get(FAKE_GENERATE_ENV_VAR) == FAKE_GENERATE_ENABLED_VALUE
+    """Whether the deterministic stub draft is used (read per call, never cached).
+
+    True when ``SWARM_FAKE_GENERATE=1`` *or* the application's own dry-run
+    switch is on (:func:`swarm_builder.runtime.dry_run_active`). Generation is
+    a single request rather than a long job, so there is no mid-flight state
+    to freeze: the answer is read once per request, which is exactly the
+    lifetime of the decision it feeds.
+    """
+    from swarm_builder import runtime
+
+    return runtime.dry_run_active() or (
+        os.environ.get(FAKE_GENERATE_ENV_VAR) == FAKE_GENERATE_ENABLED_VALUE
+    )
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+|;\s+|\bthen\b", re.IGNORECASE)

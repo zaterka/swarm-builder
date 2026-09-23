@@ -13,16 +13,23 @@ export interface paths {
         };
         /**
          * Get Health
-         * @description Report server version, resolved model/settings state, and
-         *     whether a compile is currently expected to succeed.
+         * @description Report server version, resolved model/settings state, and whether
+         *     a compile is currently expected to succeed.
          *
          *     ``compile_ready`` is ``False`` -- with a human-readable string
          *     appended to ``blockers`` for each contributing reason -- whenever
-         *     any of: the resolved default model came from the bundle fallback
-         *     (nothing the user actually configured); ``uv`` is not on ``PATH``;
-         *     the resolved workspace directory is not writable; or
-         *     ``settings.yaml`` exists but failed to parse/read. Otherwise
-         *     ``compile_ready`` is ``True`` and ``blockers`` is empty.
+         *     any of: no model has been configured *and* dry run is off; ``uv`` is
+         *     not on ``PATH``; the resolved workspace directory is not writable;
+         *     this application's own settings file exists but could not be read;
+         *     or an inherited settings file exists but could not be parsed.
+         *     Otherwise ``compile_ready`` is ``True`` and ``blockers`` is empty.
+         *
+         *     Every message here is written for someone who has only ever seen this
+         *     application: they name this application's own controls ("Model settings",
+         *     "Dry run mode") rather than a file or variable belonging to something
+         *     else. The inherited configuration is still read -- a user who has one
+         *     keeps working exactly as before -- but it is never presented as a
+         *     requirement.
          */
         get: operations["get_health_api_health_get"];
         put?: never;
@@ -188,6 +195,73 @@ export interface paths {
         get: operations["get_models_api_models_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Settings
+         * @description Everything the model-settings screen renders.
+         *
+         *     Reads the file fresh: a user can edit ``workspace/settings.json`` (or flip
+         *     the dry-run switch from another tab) between two requests.
+         */
+        get: operations["get_settings_api_settings_get"];
+        /**
+         * Put Settings
+         * @description Save the in-app model configuration and/or the dry-run switch.
+         *
+         *     Validation happens before anything is written, so a rejected submission
+         *     leaves the previous configuration exactly as it was. On success the
+         *     credential is published into this server's environment immediately (see
+         *     :func:`swarm_builder.runtime.publish_secrets`), which is what makes the
+         *     change take effect for the next generate/compile/run without a restart.
+         *
+         *     Raises:
+         *         HTTPException: 422 with every problem found, or 500 when the settings
+         *             file cannot be written (an unwritable workspace).
+         */
+        put: operations["put_settings_api_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/settings/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test Connection
+         * @description Make one minimal model call and report whether it worked.
+         *
+         *     A brand-new user's first question is "did I paste the key correctly?", and
+         *     the honest answer requires a real call -- the keyless validation gate a
+         *     compile runs cannot answer it, because it injects a test model on purpose.
+         *
+         *     Every provider-side outcome (a refused key, a timeout, an unmappable
+         *     route, nothing configured at all) is a ``200`` with ``ok: false`` and a
+         *     human-readable ``detail``; only a structurally invalid request is a
+         *     ``422``. Nothing here is persisted: testing an unsaved form must not
+         *     change the saved configuration.
+         */
+        post: operations["test_connection_api_settings_test_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -661,6 +735,8 @@ export interface components {
             /** Attempts */
             attempts: number;
             model: components["schemas"]["GenerateModelOut"];
+            /** Dryrun */
+            dryRun: boolean;
         };
         /** GenerateModelOut */
         GenerateModelOut: {
@@ -753,6 +829,16 @@ export interface components {
             runReady: boolean;
             /** Runblockers */
             runBlockers: string[];
+            /** Dryrun */
+            dryRun: boolean;
+            /** Dryrunforcedbyenv */
+            dryRunForcedByEnv: boolean;
+            /** Modelconfigured */
+            modelConfigured: boolean;
+            /** Appconfigpath */
+            appConfigPath: string;
+            /** Appconfigerror */
+            appConfigError: string | null;
         };
         /**
          * JoinEdge
@@ -801,6 +887,28 @@ export interface components {
             name: string | null;
         };
         /**
+         * ModelInput
+         * @description One provider/model/key submission.
+         *
+         *     An omitted ``api_key`` keeps the stored key when the provider is
+         *     unchanged; ``clear_api_key`` removes it; a non-empty ``api_key`` replaces
+         *     it (:func:`swarm_builder.appconfig.apply_update`).
+         */
+        ModelInput: {
+            /** Provider */
+            provider: string;
+            /** Model */
+            model: string;
+            /** Baseurl */
+            baseUrl?: string | null;
+            /** Apikey */
+            apiKey?: string | null;
+            /** Clearapikey */
+            clearApiKey?: boolean | null;
+            /** Reasoningeffort */
+            reasoningEffort?: string | null;
+        };
+        /**
          * ModelSelection
          * @description One inherited route, resolved to something PydanticAI can
          *     construct (facts 21-24). Absent on :class:`SwarmGraph` means
@@ -817,10 +925,19 @@ export interface components {
         /**
          * ModelsResponse
          * @description The full ``GET /api/models`` response body.
+         *
+         *     ``app_route`` is the route configured in Swarm Builder's *own* model
+         *     settings, classified exactly like an inherited one, so a picker can list
+         *     it first with the same enable/disable treatment. It is reported
+         *     separately from ``routes`` rather than merged into it because the two
+         *     have different lifetimes: a harness route exists because someone edited a
+         *     machine-wide file, while this one exists because the user configured it
+         *     in this application.
          */
         ModelsResponse: {
             /** Routes */
             routes: components["schemas"]["RouteOut"][];
+            appRoute: components["schemas"]["RouteOut"] | null;
             resolvedDefault: components["schemas"]["ResolvedDefaultOut"];
             /** Settingserror */
             settingsError: string | null;
@@ -890,6 +1007,32 @@ export interface components {
             needs?: string[];
             /** Signaturehint */
             signatureHint?: string | null;
+        };
+        /**
+         * ProviderOut
+         * @description One entry of the provider catalog the settings screen renders.
+         */
+        ProviderOut: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Requiresapikey */
+            requiresApiKey: boolean;
+            /** Requiresbaseurl */
+            requiresBaseUrl: boolean;
+            /** Apikeyenv */
+            apiKeyEnv: string | null;
+            /** Defaultmodel */
+            defaultModel: string | null;
+            /** Models */
+            models: string[];
+            /** Note */
+            note: string | null;
+            /** Usable */
+            usable: boolean;
+            /** Unusablereason */
+            unusableReason: string | null;
         };
         /**
          * ResolvedDefaultOut
@@ -995,10 +1138,37 @@ export interface components {
              * @default false
              */
             compiled: boolean;
+            /**
+             * Dryrun
+             * @default false
+             */
+            dryRun: boolean;
             /** Nodes */
             nodes?: {
                 [key: string]: components["schemas"]["NodeRunRecord"];
             };
+        };
+        /**
+         * SavedModelOut
+         * @description The saved model, minus the secret.
+         *
+         *     ``api_key_hint`` is the last four characters of the stored key -- enough
+         *     for a user to tell two keys apart, not enough to use one. The value itself
+         *     is never part of any response body.
+         */
+        SavedModelOut: {
+            /** Provider */
+            provider: string;
+            /** Model */
+            model: string;
+            /** Baseurl */
+            baseUrl: string | null;
+            /** Reasoningeffort */
+            reasoningEffort: string | null;
+            /** Hasapikey */
+            hasApiKey: boolean;
+            /** Apikeyhint */
+            apiKeyHint: string | null;
         };
         /**
          * SeqEdge
@@ -1018,6 +1188,46 @@ export interface components {
             target: string;
             /** Label */
             label?: string | null;
+        };
+        /**
+         * SettingsResponse
+         * @description The full ``GET /api/settings`` body.
+         */
+        SettingsResponse: {
+            /** Configpath */
+            configPath: string;
+            /** Configerror */
+            configError: string | null;
+            model: components["schemas"]["SavedModelOut"] | null;
+            /** Dryrun */
+            dryRun: boolean;
+            /** Dryrunforcedbyenv */
+            dryRunForcedByEnv: boolean;
+            /** Dryrunenvvars */
+            dryRunEnvVars: string[];
+            /** Providers */
+            providers: components["schemas"]["ProviderOut"][];
+            resolvedDefault: components["schemas"]["ResolvedDefaultOut"];
+            /** Inheritedroutes */
+            inheritedRoutes: number;
+            /** Workspacewritable */
+            workspaceWritable: boolean;
+        };
+        /**
+         * SettingsUpdateRequest
+         * @description Body of ``PUT /api/settings``.
+         *
+         *     ``None`` means "leave this alone", which is what lets the dry-run switch be
+         *     toggled without resubmitting the model form (and vice versa). Removing the
+         *     in-app model entirely is the explicit ``clear_model`` flag rather than an
+         *     ambiguous ``model: null``.
+         */
+        SettingsUpdateRequest: {
+            model?: components["schemas"]["ModelInput"] | null;
+            /** Dryrun */
+            dryRun?: boolean | null;
+            /** Clearmodel */
+            clearModel?: boolean | null;
         };
         /**
          * StartCompileRequest
@@ -1075,6 +1285,8 @@ export interface components {
             runId: string;
             /** Willcompile */
             willCompile: boolean;
+            /** Dryrun */
+            dryRun: boolean;
         };
         /**
          * StateField
@@ -1195,6 +1407,42 @@ export interface components {
             defaultTools: string[];
             /** Requiredenv */
             requiredEnv: string[];
+        };
+        /**
+         * TestConnectionRequest
+         * @description Body of ``POST /api/settings/test`` -- all fields optional.
+         *
+         *     Anything omitted falls back to the saved configuration, so the common
+         *     case (``{}``) tests exactly what a compile would use. Supplying fields is
+         *     how the screen tests an unsaved form.
+         */
+        TestConnectionRequest: {
+            /** Provider */
+            provider?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Baseurl */
+            baseUrl?: string | null;
+            /** Apikey */
+            apiKey?: string | null;
+        };
+        /**
+         * TestConnectionResponse
+         * @description The result of one test call.
+         *
+         *     A provider refusing the key, timing out, or being unreachable are all
+         *     *results*, not HTTP errors: the screen shows the detail inline next to the
+         *     form the user needs to fix.
+         */
+        TestConnectionResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Detail */
+            detail: string;
+            /** Latencyms */
+            latencyMs: number | null;
+            /** Model */
+            model: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -1424,6 +1672,97 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelsResponse"];
+                };
+            };
+        };
+    };
+    get_settings_api_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsResponse"];
+                };
+            };
+        };
+    };
+    put_settings_api_settings_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SettingsUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingsResponse"];
+                };
+            };
+            /** @description the submitted provider/model/key combination is not usable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the settings file could not be written */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    test_connection_api_settings_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestConnectionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestConnectionResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

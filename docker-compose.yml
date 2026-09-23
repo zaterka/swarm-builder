@@ -49,13 +49,17 @@ services:
       AWS_PROFILE: "${AWS_PROFILE:-}"
       AWS_REGION: "${AWS_REGION:-us-east-1}"
 
-      # Empty by default, so a real model-backed compile runs. Set
-      # SWARM_FAKE_FILL=1 in your shell before `docker compose up` for a
-      # full five-phase compile with **no model, no credentials and no
-      # ~/.dsh** — the fastest way to confirm the container works before
-      # wiring anything up:
+      # Empty by default, so a real model-backed compile runs. Either turn on
+      # "Dry run mode" in the app's Model settings (no env var needed), or set
+      # SWARM_FAKE_FILL=1 in your shell before `docker compose up` for a full
+      # five-phase compile with **no model, no credentials and no ~/.dsh** —
+      # the fastest way to confirm the container works before wiring anything
+      # up:
       #
       #     SWARM_FAKE_FILL=1 docker compose up --build
+      #
+      # Setting it also locks the in-app switch on, so a CI run cannot
+      # accidentally spend real credentials.
       SWARM_FAKE_FILL: "${SWARM_FAKE_FILL:-}"
 
     volumes:
@@ -67,10 +71,13 @@ services:
       # Docker creates them as root-owned empty directories and the
       # container will silently find no settings and no credentials.
       - "${HOME}/.aws:/home/app/.aws"
-      # Saved graphs and generated projects, so you can read and run an
-      # export from the host. Holds portable artefacts only: sources,
-      # uv.lock, and the golden diagram. The generated project's .venv
-      # lives in the `venvs` volume, never here — see note 3.
+      # Saved graphs, generated projects, and the app's own model settings
+      # (workspace/settings.json: the provider, key and dry-run switch chosen
+      # in the UI), so you can read and run an export from the host and a key
+      # entered in the browser survives a container rebuild. Holds portable
+      # artefacts only: sources, uv.lock, and the golden diagram. The
+      # generated project's .venv lives in the `venvs` volume, never here —
+      # see note 3.
       - "./workspace:/workspace"
       # Named volumes, never bind mounts onto host paths: a Linux wheel
       # cache or venv mounted onto macOS half-works, because pure-Python

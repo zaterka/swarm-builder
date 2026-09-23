@@ -58,6 +58,10 @@ class RunRecord(_CamelModel):
     model: str | None = None
     duration_ms: int | None = None
     compiled: bool = False
+    #: Whether this run used the generated project's keyless ``TestModel``
+    #: (dry run). Defaulted so records written before this field existed --
+    #: an existing ``workspace/runs/`` directory -- still parse.
+    dry_run: bool = False
     nodes: dict[str, NodeRunRecord] = Field(default_factory=dict)
 
 

@@ -42,9 +42,17 @@ def test_no_settings_file_reports_bundle_default_and_not_ready(
     assert body["resolvedModel"]["source"] == "bundle-default"
     assert body["compileReady"] is False
     assert body["blockers"]
+    assert body["modelConfigured"] is False
+    assert body["dryRun"] is False
+
+    # The blocker must be actionable *inside this application*: a brand-new
+    # user has no settings.yaml, no DSH_HOME and no reason to know either
+    # name. It may not name a component outside Swarm Builder.
     joined = " ".join(body["blockers"])
-    assert "agent-default-model" in joined
-    assert "SWARM_MODEL" in joined
+    assert "Model settings" in joined
+    assert "Dry run" in joined
+    for foreign in ("settings.yaml", "DSH_HOME", "agent-default-model", "SWARM_MODEL", "harness"):
+        assert foreign not in joined, foreign
 
 
 def test_valid_settings_file_resolves_settings_default(
@@ -99,7 +107,113 @@ def test_malformed_settings_yaml_reports_settings_error_and_not_ready(
     assert body["settingsError"] is not None
     assert body["compileReady"] is False
     joined = " ".join(body["blockers"])
-    assert "settings.yaml could not be read" in joined
+    # A user who *has* an inherited file is told about it in plain words --
+    # it is a file they own -- but it is framed as the advanced path, and the
+    # first-time-user blocker above is what a fresh install sees.
+    assert "inherited model settings file could not be read" in joined
+
+
+def test_app_config_model_makes_a_fresh_install_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving a provider and key in the app's own settings is enough: no
+    settings.yaml, no DSH_HOME, no environment variable."""
+    from swarm_builder.appconfig import AppConfig, AppModelConfig, save_config
+
+    client = _client(tmp_path, monkeypatch)
+    save_config(
+        AppConfig(
+            model=AppModelConfig(provider="openai", model="gpt-5.4-mini", api_key="sk-x")
+        )
+    )
+
+    body = client.get("/api/health").json()
+
+    assert body["resolvedModel"]["source"] == "app-config"
+    assert body["resolvedModel"]["provider"] == "openai"
+    assert body["modelConfigured"] is True
+    assert body["compileReady"] is True
+    assert body["blockers"] == []
+
+
+def test_dry_run_makes_a_fresh_install_ready_with_no_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from swarm_builder.appconfig import AppConfig, save_config
+
+    client = _client(tmp_path, monkeypatch)
+    save_config(AppConfig(dry_run=True))
+
+    body = client.get("/api/health").json()
+
+    assert body["dryRun"] is True
+    assert body["dryRunForcedByEnv"] is False
+    assert body["modelConfigured"] is False
+    # Nothing to configure and nothing to authenticate: both gates are open.
+    assert body["compileReady"] is True
+    assert body["runReady"] is True
+    assert body["blockers"] == []
+    assert body["runBlockers"] == []
+
+
+def test_an_exported_fake_fill_variable_reports_as_forced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pre-existing offline switch keeps working, and the UI is told the
+    environment is what turned it on (so it can lock its own switch)."""
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setenv("SWARM_FAKE_FILL", "1")
+
+    body = client.get("/api/health").json()
+
+    assert body["dryRun"] is True
+    assert body["dryRunForcedByEnv"] is True
+    assert body["compileReady"] is True
+    assert body["runReady"] is True
+
+
+def test_a_configured_model_with_no_credential_blocks_compile_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 3's fill spends the model, so enabling Compile and then failing on
+    an authentication error would be a worse experience than being told up
+    front. The blocker is shared with Run."""
+    from swarm_builder.appconfig import AppConfig, AppModelConfig, save_config
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    client = _client(tmp_path, monkeypatch)
+    save_config(AppConfig(model=AppModelConfig(provider="openai", model="gpt-5.4-mini")))
+
+    body = client.get("/api/health").json()
+
+    assert body["modelConfigured"] is True
+    assert body["compileReady"] is False
+    assert body["runReady"] is False
+    joined = " ".join(body["blockers"])
+    assert "Model settings" in joined
+    assert "Dry run mode" in joined
+
+
+def test_a_broken_in_app_settings_file_does_not_block_a_dry_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With dry run forced on by the environment, neither settings file changes
+    what the pipeline does -- so blocking on them would disable work that would
+    succeed. Both remain visible in their own fields."""
+    from swarm_builder.config import get_app_config_path
+
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setenv("SWARM_FAKE_FILL", "1")
+    path = get_app_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{broken", encoding="utf-8")
+
+    body = client.get("/api/health").json()
+
+    assert body["dryRun"] is True
+    assert body["appConfigError"] is not None
+    assert body["compileReady"] is True
+    assert body["blockers"] == []
 
 
 def test_uv_cache_dir_and_workspace_dir_reflect_env(

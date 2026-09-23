@@ -47,7 +47,6 @@ inspection" response to every failure mode.
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -263,6 +262,11 @@ class CompileOutcome:
     filled_node_ids: tuple[str, ...]
     attempts: int
     model: EffectiveModel
+    #: Whether this compile used the deterministic stub fill instead of a
+    #: model. Frozen at job start and reported in the ``done`` payload, so a
+    #: client never has to guess (or re-read a switch that may since have
+    #: changed) whether the project it just got is stub-bodied.
+    dry_run: bool = False
     #: Present only for ``target="langgraph"``: phases 6-9's result.
     langgraph: object | None = None
 
@@ -466,6 +470,7 @@ def _outcome_payload(outcome: CompileOutcome) -> dict[str, object]:
         "diagram": outcome.diagram,
         "filledNodeIds": list(outcome.filled_node_ids),
         "attempts": outcome.attempts,
+        "dryRun": outcome.dry_run,
         "model": {
             "provider": outcome.model.provider,
             "model": outcome.model.model,
@@ -541,6 +546,13 @@ def _warn_if_model_name_unknown(
         effective: The resolved selection.
         resolved_model: The emission the scaffolder will use.
     """
+    if effective.source == "bundle-default":
+        # Nobody chose this model id -- it is the internal stand-in used when
+        # nothing is configured (typically alongside dry run). Warning a
+        # brand-new user to "check" a model id they never picked would be a
+        # message about a decision they did not make.
+        return
+
     for line in resolved_model.env_lines:
         if not line.startswith("SWARM_MODEL="):
             continue
@@ -557,11 +569,11 @@ def _warn_if_model_name_unknown(
                 Finding(
                     code="unknown_model_name",
                     message=(
-                        f"the inherited default {emitted!r} is not a model name this "
+                        f"the default model {emitted!r} is not a model name this "
                         "pydantic-ai knows, so the exported project will fail when run "
                         "with real credentials even though the keyless gate passes; "
-                        f"check the {effective.provider!r} model id in your harness "
-                        "settings"
+                        f"pick a different model for the {effective.provider!r} provider "
+                        "in Model settings"
                     ),
                     node_ids=(),
                 ),
@@ -732,27 +744,44 @@ def _remove_entry(path: Path) -> None:
 
 
 def _fake_fill_enabled() -> bool:
-    """Whether ``SWARM_FAKE_FILL=1`` selects the deterministic stub fill."""
-    return os.environ.get(FAKE_FILL_ENV_VAR) == FAKE_FILL_ENABLED_VALUE
+    """Whether the deterministic stub fill is selected right now.
+
+    True when the application's own dry-run switch is on, or when any of
+    ``SWARM_FAKE_FILL``/``SWARM_FAKE_GENERATE``/``SWARM_RUN_TEST_MODEL`` is set
+    to ``1`` (all three are one decision -- see
+    :func:`swarm_builder.runtime.dry_run_active`, which is the single place
+    that answers it).
+
+    This is the *freeze point*: called at the start of a job, and never again
+    inside it. The answer is passed explicitly down every seam that used to
+    re-read the environment, so a user toggling the switch mid-compile cannot
+    produce a project whose structure is real but whose bodies are stubs (or
+    the reverse).
+    """
+    from swarm_builder import runtime
+
+    return runtime.dry_run_active()
 
 
-def _select_filler(real_filler: Filler | None) -> Filler:
+def _select_filler(real_filler: Filler | None, dry_run: bool) -> Filler:
     """Pick the Phase-3 filler for this compile.
 
     Args:
         real_filler: The model-backed filler the caller injected, or
             ``None`` before ``compile/agent.py`` exists.
+        dry_run: The decision ``run_compile`` froze when the job started --
+            taken as an argument rather than re-read here so a mid-compile
+            toggle cannot switch fillers halfway through.
 
     Returns:
-        :func:`fake_filler` when ``SWARM_FAKE_FILL=1``, else
-        ``real_filler``.
+        :func:`fake_filler` when dry run is on, else ``real_filler``.
 
     Raises:
         FillUnavailableError: If neither is available. The message names
             both ways out, because this is a configuration seam a user
             can actually hit today.
     """
-    if _fake_fill_enabled():
+    if dry_run:
         return fake_filler
     if real_filler is None:
         raise FillUnavailableError(
@@ -809,6 +838,7 @@ async def _run_fill_once(
     job: Job,
     filler: Filler | None,
     *,
+    dry_run: bool,
     graph: SwarmGraph,
     project_dir: Path,
     resolved_model: ResolvedModel,
@@ -824,6 +854,7 @@ async def _run_fill_once(
     Args:
         job: The job to append events to.
         filler: The caller-injected real filler, or ``None``.
+        dry_run: The filler decision frozen at job start.
         graph: The document being compiled.
         project_dir: The scaffolded project to fill.
         resolved_model: The generated project's default model source.
@@ -840,7 +871,7 @@ async def _run_fill_once(
         _emit_log(job, f"fill attempt {state.attempt} (one retry, previous failure appended)")
 
     try:
-        selected = _select_filler(filler)
+        selected = _select_filler(filler, dry_run)
     except FillUnavailableError as exc:
         failure = _PhaseFailure(
             phase=PHASE_FILL,
@@ -1032,6 +1063,7 @@ async def _run_fill_boundary_validate(
     job: Job,
     filler: Filler | None,
     *,
+    dry_run: bool,
     graph: SwarmGraph,
     project_dir: Path,
     baseline: ProjectBaseline,
@@ -1050,6 +1082,7 @@ async def _run_fill_boundary_validate(
     Args:
         job: The job to append events to.
         filler: The caller-injected real filler, or ``None``.
+        dry_run: The filler decision frozen at job start.
         graph: The document being compiled.
         project_dir: The scaffolded project to fill and validate.
         baseline: The Phase-2 baseline Phase 4 compares against.
@@ -1071,6 +1104,7 @@ async def _run_fill_boundary_validate(
         await _run_fill_once(
             job,
             filler,
+            dry_run=dry_run,
             graph=graph,
             project_dir=project_dir,
             resolved_model=resolved_model,
@@ -1100,6 +1134,7 @@ async def _run_fill_boundary_validate(
 async def _run_langgraph_target(
     job: Job,
     *,
+    dry_run: bool,
     graph: SwarmGraph,
     source_project_dir: Path,
     project_dir: Path,
@@ -1108,7 +1143,10 @@ async def _run_langgraph_target(
     converter: object | None,
 ) -> object:
     """Run ``compile/langgraph``'s phases, translating its refusal into a
-    :class:`PhaseFailureError` so the terminal handling below is shared."""
+    :class:`PhaseFailureError` so the terminal handling below is shared.
+
+    ``dry_run`` -- the decision frozen at job start -- selects the
+    deterministic stub conversion instead of the model-backed one."""
     # Imported here: compile/langgraph imports this module's FillResult, so a
     # module-level import would be circular.
     from swarm_builder.compile.langgraph.pipeline import (
@@ -1133,7 +1171,7 @@ async def _run_langgraph_target(
             source_project_dir=source_project_dir,
             project_dir=project_dir,
             effective=effective,
-            use_fake=_fake_fill_enabled(),
+            use_fake=dry_run,
             uv_cache_dir=uv_cache_dir,
             emitters=emitters,
             converter=converter,  # type: ignore[arg-type]
@@ -1162,6 +1200,7 @@ async def run_compile(
     target: str = TARGET_PYDANTIC_GRAPH,
     langgraph_project_dir: Path | None = None,
     langgraph_converter: object | None = None,
+    dry_run: bool | None = None,
 ) -> CompileOutcome:
     """Run the five-phase compile for ``graph``, streaming progress into
     the job registered under ``compile_id``.
@@ -1199,6 +1238,15 @@ async def run_compile(
         langgraph_project_dir: Where the LangGraph export is written;
             required when ``target="langgraph"``.
         langgraph_converter: Test seam for phase 7 (replaces the agent).
+        dry_run: Whether to use the deterministic stub fill (and stub
+            LangGraph conversion) instead of the model. ``None`` reads the
+            current state once, here, at job start; an explicit value is what
+            a caller that has already decided -- the run route, whose compile
+            step must agree with the run it is about to perform -- passes in.
+            Either way the decision is frozen for this job: it is handed to
+            every seam as an argument, never re-read from the environment or
+            the settings file, so toggling dry run mid-compile cannot produce
+            a project that is half stub and half real.
 
     Returns:
         The :class:`CompileOutcome` describing the finished compile --
@@ -1217,11 +1265,27 @@ async def run_compile(
         raise ValueError("target='langgraph' requires langgraph_project_dir")
 
     job = registry.get(compile_id)
-    job.target = target  # type: ignore[attr-defined]
+    if getattr(job, "kind", "compile") == "compile":
+        # A run job that compiles first (``finalize=False``) keeps its own
+        # kind: the export target belongs to compiles, and labelling a run as
+        # a compile is the kind of detail that misleads a client reading the
+        # snapshot.
+        job.target = target  # type: ignore[attr-defined]
     if job.status == "queued":
         job.mark_running()
 
     resolved_uv_cache_dir = uv_cache_dir if uv_cache_dir is not None else get_uv_cache_dir()
+    if dry_run is None:
+        dry_run = _fake_fill_enabled()
+    elif not dry_run:
+        # An explicit ``False`` must not be able to defeat an exported
+        # ``SWARM_FAKE_FILL=1``: the environment forces dry run on precisely so
+        # that an offline or CI run cannot silently spend real credentials.
+        # Checked here, once, at the freeze point -- never re-read inside the
+        # job, which would reintroduce the mid-job toggle this design rules out.
+        from swarm_builder import runtime as _runtime
+
+        dry_run = _runtime.dry_run_forced_by_env()
 
     try:
         effective, resolved_model = _run_review_phase(job, graph, dsh_home)
@@ -1233,6 +1297,7 @@ async def run_compile(
         validation_result, filled_node_ids, attempts = await _run_fill_boundary_validate(
             job,
             filler,
+            dry_run=dry_run,
             graph=graph,
             project_dir=project_dir,
             baseline=baseline,
@@ -1246,6 +1311,7 @@ async def run_compile(
             assert langgraph_project_dir is not None
             langgraph_outcome = await _run_langgraph_target(
                 job,
+                dry_run=dry_run,
                 graph=graph,
                 source_project_dir=project_dir,
                 project_dir=langgraph_project_dir,
@@ -1261,6 +1327,7 @@ async def run_compile(
             filled_node_ids=filled_node_ids,
             attempts=attempts,
             model=effective,
+            dry_run=dry_run,
             langgraph=langgraph_outcome,
         )
         if finalize:

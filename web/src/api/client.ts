@@ -16,12 +16,16 @@ import type {
   ReviewResponse,
   RunListResponse,
   RunRecord,
+  SettingsResponse,
+  SettingsUpdateRequest,
   StartCompileRequest,
   StartCompileResponse,
   StartRunRequest,
   StartRunResponse,
   SwarmGraph,
   TemplateEntryOut,
+  TestConnectionRequest,
+  TestConnectionResponse,
   ValidationError,
 } from './schema';
 import type { CompileSseEvent } from './compileWire';
@@ -63,6 +67,15 @@ export class ReviewUnavailableError extends ApiError {}
 /** GET /api/templates 503 -- swarm_builder.templates.registry could not
  * be imported. */
 export class TemplatesUnavailableError extends ApiError {}
+
+/** PUT /api/settings 422 -- the submitted provider/model/key combination is
+ * not usable. `detail` carries every problem found, so the form can show them
+ * all at once rather than one per attempt. */
+export class SettingsValidationError extends ApiError {
+  get problems(): string[] {
+    return Array.isArray(this.detail) ? (this.detail as string[]) : [];
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Low-level request helper
@@ -149,6 +162,36 @@ async function listTemplates(): Promise<TemplateEntryOut[]> {
 
 function getModels(): Promise<ModelsResponse> {
   return request<ModelsResponse>('/models');
+}
+
+/** The in-app model settings (`GET /api/settings`). Never carries the key. */
+function getSettings(): Promise<SettingsResponse> {
+  return request<SettingsResponse>('/settings');
+}
+
+/** Save a provider/model/key and/or the dry-run switch. An omitted `model`
+ * leaves the stored one alone; `clearModel: true` removes it. */
+async function putSettings(body: SettingsUpdateRequest): Promise<SettingsResponse> {
+  try {
+    return await request<SettingsResponse>('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 422) {
+      throw new SettingsValidationError(err.status, err.detail);
+    }
+    throw err;
+  }
+}
+
+/** Make one minimal real model call to check a key. Everything omitted falls
+ * back to the saved configuration. */
+function testConnection(body: TestConnectionRequest): Promise<TestConnectionResponse> {
+  return request<TestConnectionResponse>('/settings/test', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
 }
 
 async function reviewGraph(id: string): Promise<ReviewResponse> {
@@ -548,6 +591,9 @@ export const api = {
   deleteGraph,
   listTemplates,
   getModels,
+  getSettings,
+  putSettings,
+  testConnection,
   reviewGraph,
   exportGraph,
   startCompile,

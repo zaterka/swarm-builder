@@ -52,6 +52,42 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dsh_home: Path) -> 
     return TestClient(create_app())
 
 
+def test_app_route_reports_the_in_app_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route a user configured in this application is reported separately
+    from the inherited ones, and classified the same way."""
+    from swarm_builder.appconfig import AppConfig, AppModelConfig, save_config
+
+    dsh_home = tmp_path / "dsh_home"
+    dsh_home.mkdir()
+    client = _client(tmp_path, monkeypatch, dsh_home)
+    save_config(
+        AppConfig(
+            model=AppModelConfig(provider="anthropic", model="claude-sonnet-4-6", api_key="sk-x")
+        )
+    )
+
+    body = client.get("/api/models").json()
+
+    assert body["appRoute"]["key"] == "anthropic"
+    assert body["appRoute"]["emission"] == "known-name"
+    assert body["appRoute"]["requiredExtra"] == "anthropic"
+    assert body["resolvedDefault"]["source"] == "app-config"
+    assert body["resolvedDefault"]["provider"] == "anthropic"
+    # Inherited routes are unaffected.
+    assert body["routes"] == []
+
+
+def test_no_app_route_when_nothing_is_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dsh_home = tmp_path / "dsh_home"
+    dsh_home.mkdir()
+    body = _client(tmp_path, monkeypatch, dsh_home).get("/api/models").json()
+    assert body["appRoute"] is None
+
+
 def test_routes_and_has_explicit_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     dsh_home = tmp_path / "dsh_home"
     dsh_home.mkdir()

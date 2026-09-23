@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from swarm_builder.appconfig import AppConfig, AppModelConfig
 from swarm_builder.inherit.settings import (
     AgentDefaultModel,
     EffectiveModel,
@@ -23,6 +24,7 @@ from swarm_builder.inherit.settings import (
     Settings,
     read_settings,
     resolve_effective_model,
+    route_for_app_model,
 )
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "settings"
@@ -123,6 +125,184 @@ def test_route_with_no_api_and_no_aws_fields_is_none(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_app_config_outranks_settings_file_and_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route a user chose in this application's own model settings wins.
+
+    Precedence is source-wise: the *whole* selection (provider, model, key
+    variable, key) comes from the winning source, so a pair no single source
+    declares can never be resolved.
+    """
+    _write_settings(tmp_path, "full.yaml")
+    monkeypatch.setenv("SWARM_MODEL", "bedrock:should-not-be-used")
+
+    app_config = AppConfig(
+        model=AppModelConfig(provider="openai", model="gpt-5.4-mini", api_key="sk-app")
+    )
+    result = resolve_effective_model(tmp_path, app_config=app_config)
+
+    assert result.source == "app-config"
+    assert result.provider == "openai"
+    assert result.model == "gpt-5.4-mini"
+    assert result.api_key_env == "OPENAI_API_KEY"
+    assert result.api_key == "sk-app"
+    assert result.route is not None
+    assert result.route.key == "openai"
+    assert result.route.base_url is None
+
+
+def test_app_config_route_carries_the_protocol_the_registry_declares(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A curated provider's synthesized route declares its protocol, so
+    classification and the Phase-5 extras assertion see what the picker
+    promised."""
+    _clear_swarm_env(monkeypatch)
+    app_config = AppConfig(
+        model=AppModelConfig(provider="anthropic", model="claude-sonnet-4-6", api_key="sk-app")
+    )
+    result = resolve_effective_model(tmp_path, app_config=app_config)
+    assert result.route is not None
+    assert result.route.api == "anthropic-messages"
+    assert result.route.api_key_env == "ANTHROPIC_API_KEY"
+
+
+def test_app_config_base_url_is_kept_only_for_the_custom_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_swarm_env(monkeypatch)
+    app_config = AppConfig(
+        model=AppModelConfig(
+            provider="custom",
+            model="qwen3",
+            base_url="http://127.0.0.1:8000/v1",
+            api_key="sk-app",
+        )
+    )
+    result = resolve_effective_model(tmp_path, app_config=app_config)
+    assert result.source == "app-config"
+    assert result.base_url == "http://127.0.0.1:8000/v1"
+    assert result.api_key_env == "SWARM_API_KEY"
+    assert result.route is not None and result.route.api is None
+
+
+def test_an_invalid_app_model_never_shadows_a_working_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A base URL carrying credentials is rejected on save, so one on disk was
+    hand-edited. It must not win the precedence chain: an entry that cannot
+    build a model would fail every compile with an unmappable-route error while
+    ignoring a perfectly good inherited/environment configuration.
+
+    The screen reports the problem in its own right, so the user still learns
+    what is wrong.
+    """
+    monkeypatch.setenv("SWARM_MODEL", "bedrock:us.anthropic.claude-sonnet-5")
+    monkeypatch.delenv("SWARM_BASE_URL", raising=False)
+    app_config = AppConfig(
+        model=AppModelConfig(
+            provider="custom",
+            model="qwen3",
+            base_url="https://user:sk-leak@host/v1",
+            api_key="sk-app",
+        )
+    )
+
+    result = resolve_effective_model(tmp_path, app_config=app_config)
+
+    assert result.source == "env-fallback"
+    assert "sk-leak" not in repr(result)
+
+
+def test_route_for_app_model_strips_embedded_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defence in depth for the renderers: even if such a value reached disk,
+    the synthesized route (which `to_resolved_model` splices into a generated
+    project's deps.py and .env.example) never carries it."""
+    _clear_swarm_env(monkeypatch)
+    route = route_for_app_model(
+        AppModelConfig(
+            provider="custom",
+            model="qwen3",
+            base_url="https://user:sk-leak@host/v1",
+            api_key="sk-app",
+        )
+    )
+    assert route.base_url == "https://host/v1"
+
+
+def test_an_unknown_app_provider_never_shadows_a_working_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SWARM_MODEL", "bedrock:us.anthropic.claude-sonnet-5")
+    monkeypatch.delenv("SWARM_BASE_URL", raising=False)
+    app_config = AppConfig(model=AppModelConfig(provider="OpenAI ", model="gpt-5"))
+
+    result = resolve_effective_model(tmp_path, app_config=app_config)
+
+    assert result.source == "env-fallback"
+
+
+def test_a_graph_override_to_the_in_app_provider_finds_its_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The override wins the provider/model, but the app config still supplies
+    the endpoint and credential for a provider the inherited file does not
+    describe -- otherwise a graph override to a configured custom endpoint
+    would resolve with no base URL and be refused as unmappable."""
+    _clear_swarm_env(monkeypatch)
+    app_config = AppConfig(
+        model=AppModelConfig(
+            provider="custom",
+            model="qwen3",
+            base_url="http://127.0.0.1:8000/v1",
+            api_key="sk-app",
+        )
+    )
+
+    result = resolve_effective_model(
+        tmp_path, graph_override=("custom", "other-model", None), app_config=app_config
+    )
+
+    assert result.source == "graph-override"
+    assert result.model == "other-model"
+    assert result.base_url == "http://127.0.0.1:8000/v1"
+    assert result.api_key == "sk-app"
+
+
+def test_broken_app_config_falls_through_to_the_next_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mangled settings file must never crash resolution; the health check
+    is what reports it."""
+    monkeypatch.setenv("SWARM_MODEL", "bedrock:us.anthropic.claude-sonnet-5")
+    monkeypatch.delenv("SWARM_BASE_URL", raising=False)
+
+    result = resolve_effective_model(
+        tmp_path, app_config=AppConfig(error="failed to parse /x/settings.json")
+    )
+    assert result.source == "env-fallback"
+
+
+def test_empty_app_config_means_no_in_app_route(tmp_path: Path) -> None:
+    result = resolve_effective_model(tmp_path, app_config=AppConfig())
+    assert result.source == "bundle-default"
+
+
+def test_effective_model_repr_never_shows_the_key(tmp_path: Path) -> None:
+    """``api_key`` is a secret that travels through compile and run paths, so
+    it must be invisible to every incidental ``repr`` (a log line, a
+    traceback, a failure report)."""
+    app_config = AppConfig(
+        model=AppModelConfig(provider="openai", model="gpt-5", api_key="sk-do-not-print")
+    )
+    result = resolve_effective_model(tmp_path, app_config=app_config)
+    assert "sk-do-not-print" not in repr(result)
+    assert "sk-do-not-print" not in str(result)
+
+
 def test_graph_override_wins_over_everything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -142,6 +322,22 @@ def test_graph_override_wins_over_everything(
     assert result.route.key == "kornerstone"
     assert result.base_url == "http://localhost:8000/v1"
     assert result.api_key_env == "KORNERSTONE_API_KEY"
+
+
+def test_graph_override_also_beats_the_app_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _clear_swarm_env(monkeypatch)
+    app_config = AppConfig(
+        model=AppModelConfig(provider="openai", model="gpt-5", api_key="sk-app")
+    )
+    result = resolve_effective_model(
+        tmp_path, graph_override=("bedrock", "us.anthropic.claude-sonnet-5", None),
+        app_config=app_config,
+    )
+    assert result.source == "graph-override"
+    assert result.provider == "bedrock"
+    assert result.api_key is None
 
 
 def test_settings_default_wins_over_env(

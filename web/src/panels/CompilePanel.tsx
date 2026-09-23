@@ -6,6 +6,7 @@ import {
   CompileConflictError,
   ReviewUnavailableError,
 } from '../api/client';
+import { modelSourceLabel } from './modelSource';
 import type {
   CompileSnapshot,
   FindingOut,
@@ -60,7 +61,7 @@ function readStoredCompile(graphId: string): StoredCompile | null {
  * Review findings -> model picker -> Compile -> streamed phases/log ->
  * result (PLAN.md "Frontend" -> "Compile panel").
  */
-export function CompilePanel() {
+export function CompilePanel({ settingsRevision = 0 }: { settingsRevision?: number } = {}) {
   const graph = useGraphStore((s) => s.graph);
   const dirty = useGraphStore((s) => s.dirty);
   const saveStatus = useGraphStore((s) => s.saveStatus);
@@ -95,7 +96,10 @@ export function CompilePanel() {
   useEffect(() => {
     refreshHealth();
     api.getModels().then(setModels).catch(() => setModels(null));
-  }, []);
+    // Re-read after a settings save: every server read is fresh, so bumping
+    // the revision is all it takes for a new provider to show up with no
+    // page reload.
+  }, [settingsRevision]);
 
   // Review is never fired on a bare timer against the in-memory
   // document (review finding A5): it only runs after an autosave PUT
@@ -338,22 +342,41 @@ export function CompilePanel() {
               ? (
                 <>
                   Overridden by this graph: <strong>{graphOverride.provider} / {graphOverride.model}</strong>
-                  {' '}— would otherwise inherit: {resolvedDefault.provider} / {resolvedDefault.model} (
-                  {resolvedDefault.source})
+                  {' '}— would otherwise use: {resolvedDefault.provider} / {resolvedDefault.model} (
+                  {modelSourceLabel(resolvedDefault.source)})
                 </>
               )
               : (
                 <>
-                  Inherited: <strong>{resolvedDefault.provider} / {resolvedDefault.model}</strong> — via{' '}
-                  {resolvedDefault.source}
+                  Using: <strong>{resolvedDefault.provider} / {resolvedDefault.model}</strong> —{' '}
+                  {modelSourceLabel(resolvedDefault.source)}
                 </>
               )}
           </div>
         )}
-        {models?.settingsError && <div className="sb-hint">settings.yaml error: {models.settingsError}</div>}
+        {health?.dryRun && (
+          <div className="sb-hint">
+            Dry run: node bodies come from the built-in stub, not a model.
+            {!health.modelConfigured && (
+              <>
+                {' '}
+                The project records the offline default model id, which nothing here chose — set a
+                model to change what the export targets.
+              </>
+            )}
+          </div>
+        )}
         <div className="sb-field-row">
+          <button className="sb-btn-ghost sb-btn-sm" onClick={refreshHealth} title="Re-read the server's model state">
+            Refresh
+          </button>
           <select value={modelOverrideProvider} onChange={(e) => setModelOverrideProvider(e.target.value)}>
-            <option value="">(inherit default)</option>
+            <option value="">(use the configured model)</option>
+            {models?.appRoute && (
+              <option value={models.appRoute.key} disabled={models.appRoute.emission === 'unmappable'}>
+                {models.appRoute.key} — configured here
+              </option>
+            )}
             {models?.routes.map((route) => (
               <option key={route.key} value={route.key} disabled={route.emission === 'unmappable'}>
                 {route.key}

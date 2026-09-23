@@ -32,20 +32,32 @@ flowchart TB
     panel["Compile panel<br/>with model picker"]
   end
   subgraph server["FastAPI server on 127.0.0.1"]
-    routes["routes/<br/>graphs, health, models, export"]
+    routes["routes/<br/>graphs, health, models, settings, export"]
     compile["compile/<br/>review, scaffold, fill, boundary, validate"]
   end
-  settings["Harness settings.yaml<br/>read once per call, never cached"]
+  appcfg["workspace/settings.json<br/>the app's own model settings<br/>(provider, key, dry-run switch)"]
+  settings["Harness settings.yaml<br/>optional inheritance, read once per call"]
   ws["workspace/<br/>graphs/*.json and projects/"]
   gate["Generated project<br/>uv sync, import, dry run"]
 
   canvas -->|"PUT graph JSON"| routes
   routes -->|"graph document"| compile
   panel -->|"POST compile, then SSE"| compile
-  settings -->|"routes and default model"| routes
+  appcfg -->|"provider, model, key, dry run"| routes
+  settings -->|"routes and default model<br/>(lower precedence)"| routes
   compile -->|"scaffold, then fill"| ws
   compile -->|"uv sync and dry run"| gate
 ```
+
+Model resolution has one precedence chain, in one place
+(`inherit/settings.resolve_effective_model`): **graph override → the app's own
+settings (`app-config`) → an inherited `settings.yaml` default → `SWARM_MODEL`
+→ the built-in offline stand-in**. Whichever source wins supplies the whole
+selection — provider, model, endpoint and key together — because a pair no
+single source declares (a provider from one, a model id from another) is exactly
+the silent mis-routing that chain exists to make impossible. The optional
+inherited file therefore keeps working, and is simply no longer the first thing
+a new user is asked for.
 
 Two structural properties are worth stating up front, because most of the
 design follows from them:
@@ -59,9 +71,20 @@ design follows from them:
    provider directly, and spawns no child process at all: its self-check tool
    parses in-process instead of executing
    ([why](#the-agent-cannot-execute-code-and-that-is-the-invariant)). The only
-   harness contact is *reading* its settings file. The validation gate is the
-   one place that does shell out, and it shells out to `uv` on the generated
-   project, never to model-authored code.
+   harness contact is *optionally reading* its settings file. The validation
+   gate is the one place that does shell out, and it shells out to `uv` on the
+   generated project, never to model-authored code.
+
+**Where a credential lives.** The API key a user enters in the app is written
+to `workspace/settings.json` with `0600` permissions (inside the git-ignored
+workspace), and published into the server process's environment under the
+provider's own variable name (`OPENAI_API_KEY`, …) — which is what makes
+PydanticAI's known-name resolution, the credential check, and every run
+subprocess agree without a second place that knows how to build a model. It is
+never returned by any endpoint (only "a key is stored" plus its last four
+characters), never logged, and never written into a generated project; the
+gate that proves a project imports and dry-runs keylessly has every publishable
+variable in its strip list, asserted by a test.
 
 ## The graph document
 

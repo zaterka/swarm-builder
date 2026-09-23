@@ -65,9 +65,14 @@ def test_generate_refuses_up_front_when_the_provider_key_is_missing(deepseek_rou
     response = TestClient(create_app()).post("/api/graphs/generate", json={"description": "x"})
     assert response.status_code == 503
     detail = response.json()["detail"]
-    assert "Generate disabled" in detail
-    assert "DEEPSEEK_API_KEY" in detail
-    assert ".env" in detail
+    # App-native: the fix is named where the user can perform it, not as a
+    # shell export or an editor instruction. The message is shared with the
+    # health check, so it says exactly what the user must do and nothing about
+    # where this particular request happened to fail.
+    assert "DEEPSEEK_API_KEY" not in detail
+    assert "Model settings" in detail
+    assert "Dry run mode" in detail
+    assert ".env" not in detail
 
 
 def test_generate_maps_pydantic_ai_user_error_to_503(

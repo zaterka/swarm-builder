@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import { formatRelativeTime } from '../relativeTime';
 import type { FindingOut, GraphListError, GraphSummary, HealthResponse, SwarmGraph } from '../api/schema';
 import GeneratePanel from './GeneratePanel';
+import { modelState, needsAttention } from './modelState';
 
 /**
  * The start screen (GROUP6_PLAN.md decision 1: a graph picker precedes
@@ -14,15 +15,25 @@ import GeneratePanel from './GeneratePanel';
 export function GraphPicker(props: {
   onOpen: (id: string) => void;
   onCreateNew: () => void;
-  onGenerated: (graph: SwarmGraph, warnings: FindingOut[], attempts: number) => void;
+  onGenerated: (
+    graph: SwarmGraph,
+    warnings: FindingOut[],
+    attempts: number,
+    dryRun?: boolean,
+  ) => void;
+  /** Opens the model settings screen. */
+  onOpenSettings?: () => void;
+  /** Bumped by the shell after a settings save, to re-read health. */
+  settingsRevision?: number;
+  /** Read by the shell, which also feeds the top bar from it: one value, so the
+   *  bar and this page's notice can never disagree about the model. A `null`
+   *  means "not known yet" (or a failed read) and hides the strip, as before. */
+  health: HealthResponse | null;
 }) {
   const [graphs, setGraphs] = useState<GraphSummary[]>([]);
   const [errors, setErrors] = useState<GraphListError[]>([]);
   const [loading, setLoading] = useState(true);
-  // Environment readiness is otherwise only visible in the compile
-  // drawer, i.e. after picking a graph. A missing/failed /api/health
-  // just hides the strip rather than blocking the screen.
-  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const health = props.health;
 
   const refresh = () => {
     setLoading(true);
@@ -36,13 +47,6 @@ export function GraphPicker(props: {
   };
 
   useEffect(refresh, []);
-
-  useEffect(() => {
-    api
-      .health()
-      .then(setHealth)
-      .catch(() => setHealth(null));
-  }, []);
 
   const handleDelete = async (id: string, withProject: boolean) => {
     await api.deleteGraph(id, { project: withProject });
@@ -67,8 +71,17 @@ export function GraphPicker(props: {
         </button>
       </header>
 
+      {/* Only when something needs doing: the steady state is quiet, because the
+          top bar already says which model this page will spend. */}
+      {needsAttention(modelState(health)) && (
+        <ModelNotice health={health} onOpenSettings={props.onOpenSettings} />
+      )}
+
       <section className="sb-start-section sb-start-generate">
-        <GeneratePanel onGenerated={props.onGenerated} />
+        <GeneratePanel
+          onGenerated={props.onGenerated}
+          settingsRevision={props.settingsRevision}
+        />
       </section>
 
       <section className="sb-start-section">
@@ -147,12 +160,76 @@ export function GraphPicker(props: {
   );
 }
 
-/** What this install is set up to do, before a graph is even opened:
- * whether compiling can run at all, which model it would use, and where
- * graphs are being written. */
+/**
+ * The one thing on this page that appears only when the user has to act:
+ * nothing configured, a missing API key, or a settings file that cannot be
+ * read. Everything steady-state is in the top bar, which is why this is a
+ * notice rather than a permanent row — a read-out between "New graph" and
+ * "Describe your workflow" reads as a step in the flow.
+ *
+ * It carries the *reason and the remedy* in this application's own short words.
+ * The server's longer sentence for the same condition stays in the environment
+ * strip's blocker list, so no sentence is printed twice.
+ *
+ * No `aria-live`: this is ordinary page content present at load, and a live
+ * region that mounts already-populated is announced inconsistently across
+ * assistive technologies.
+ */
+const NOTICE_ACTIONS: Record<string, string> = {
+  config: 'Fix in Model settings',
+  warn: 'Set up a model',
+  cred: 'Add a key',
+};
+
+export function ModelNotice(props: {
+  health: HealthResponse | null;
+  onOpenSettings?: () => void;
+}) {
+  const state = modelState(props.health);
+  const action = NOTICE_ACTIONS[state];
+  if (!action) return null;
+
+  return (
+    <section className="sb-model-notice" data-state={state} data-testid="model-notice">
+      <div className="sb-model-notice-main">
+        {state === 'warn' && (
+          <>
+            <strong>No model is configured yet.</strong>{' '}
+            <span className="sb-hint">
+              Choose a provider and add your API key to describe, compile and run workflows — or turn
+              on Dry run mode to build and run offline.
+            </span>
+          </>
+        )}
+        {state === 'cred' && (
+          <span className="sb-hint">
+            No API key for this model yet — describing and compiling need one.
+          </span>
+        )}
+        {state === 'config' && (
+          <span className="sb-hint">
+            Swarm Builder&apos;s model settings could not be read — open Model settings to fix them.
+          </span>
+        )}
+      </div>
+      {props.onOpenSettings && (
+        <button className="sb-btn-primary" onClick={props.onOpenSettings}>
+          {action}
+        </button>
+      )}
+    </section>
+  );
+}
+
+/** What this install is set up to do, before a graph is even opened: whether
+ * compiling can run at all, where graphs are being written, and which version
+ * this is. The *model* is the top bar's statement, not this one's.
+ *
+ * The blockers it lists are the server's own, written in this application's
+ * terms ("Model settings", "Dry run mode"); nothing here asks a new user to
+ * know about a file or variable belonging to something else. */
 function EnvironmentStrip(props: { health: HealthResponse }) {
   const { health } = props;
-  const model = health.resolvedModel;
   return (
     <div className="sb-env-strip">
       <div className="sb-env-line">
@@ -162,11 +239,9 @@ function EnvironmentStrip(props: { health: HealthResponse }) {
         >
           {health.compileReady ? 'Ready to compile' : 'Compile blocked'}
         </span>
-        {model && (
-          <span className="sb-env-item">
-            {model.provider} / {model.model}
-          </span>
-        )}
+        {/* No model line here: the top bar says which model this install will
+            spend, always and more prominently. This strip keeps what is
+            genuinely about the environment. */}
         <span className="sb-env-item" title={health.workspaceDir}>
           workspace <code>{shortenPath(health.workspaceDir)}</code>
         </span>

@@ -15,9 +15,15 @@ from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
+from swarm_builder import runtime
 from swarm_builder.config import get_dsh_home
 from swarm_builder.inherit.routes import classify_route
-from swarm_builder.inherit.settings import read_settings, resolve_effective_model
+from swarm_builder.inherit.settings import (
+    RouteConfig,
+    read_settings,
+    resolve_effective_model,
+    route_for_app_model,
+)
 
 router = APIRouter(tags=["models"])
 
@@ -64,11 +70,35 @@ class ResolvedDefaultOut(_CamelModel):
 
 
 class ModelsResponse(_CamelModel):
-    """The full ``GET /api/models`` response body."""
+    """The full ``GET /api/models`` response body.
+
+    ``app_route`` is the route configured in Swarm Builder's *own* model
+    settings, classified exactly like an inherited one, so a picker can list
+    it first with the same enable/disable treatment. It is reported
+    separately from ``routes`` rather than merged into it because the two
+    have different lifetimes: a harness route exists because someone edited a
+    machine-wide file, while this one exists because the user configured it
+    in this application.
+    """
 
     routes: list[RouteOut]
+    app_route: RouteOut | None
     resolved_default: ResolvedDefaultOut
     settings_error: str | None
+
+
+def _route_out(route: RouteConfig) -> RouteOut:
+    """Render one route, classified for a picker."""
+    emission = classify_route(route)
+    return RouteOut(
+        key=route.key,
+        api=route.api,
+        has_explicit_models=len(route.models) > 0,
+        emission=emission.emission,
+        required_extra=emission.required_extra,
+        unmappable_reason=emission.unmappable_reason,
+        models=[ModelInfoOut(id=m.id, name=m.name) for m in route.models],
+    )
 
 
 @router.get("/models", response_model=ModelsResponse)
@@ -87,19 +117,10 @@ def get_models() -> ModelsResponse:
 
     routes_out: list[RouteOut] = []
     if settings is not None and settings.error is None:
-        for route in settings.routes:
-            emission = classify_route(route)
-            routes_out.append(
-                RouteOut(
-                    key=route.key,
-                    api=route.api,
-                    has_explicit_models=len(route.models) > 0,
-                    emission=emission.emission,
-                    required_extra=emission.required_extra,
-                    unmappable_reason=emission.unmappable_reason,
-                    models=[ModelInfoOut(id=m.id, name=m.name) for m in route.models],
-                )
-            )
+        routes_out = [_route_out(route) for route in settings.routes]
+
+    app_model = runtime.current_model_config()
+    app_route = _route_out(route_for_app_model(app_model)) if app_model is not None else None
 
     effective = resolve_effective_model(dsh_home)
     resolved_default = ResolvedDefaultOut(
@@ -110,6 +131,7 @@ def get_models() -> ModelsResponse:
 
     return ModelsResponse(
         routes=routes_out,
+        app_route=app_route,
         resolved_default=resolved_default,
         settings_error=settings_error,
     )

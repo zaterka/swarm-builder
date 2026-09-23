@@ -74,7 +74,14 @@ curl -s http://127.0.0.1:8420/api/health | python3 -m json.tool
   "workspaceWritable": true,
   "webDistPresent": true,
   "compileReady": true,
-  "blockers": []
+  "blockers": [],
+  "runReady": true,
+  "runBlockers": [],
+  "dryRun": false,
+  "dryRunForcedByEnv": false,
+  "modelConfigured": true,
+  "appConfigPath": "/Users/you/swarm-builder/workspace/settings.json",
+  "appConfigError": null
 }
 ```
 
@@ -84,27 +91,52 @@ curl -s http://127.0.0.1:8420/api/health | python3 -m json.tool
 | `dshHome` | The resolved `DSH_HOME` (default `~/.dsh`). |
 | `settingsError` | Non-null when `settings.yaml` exists but could not be read or parsed — a real user mistake, distinct from the file being absent. |
 | `resolvedModel.provider` / `.model` | The model a compile would spend right now. |
-| `resolvedModel.source` | `graph-override`, `settings-default`, `env-fallback`, or `bundle-default`. **This is the field that tells you where the route came from.** |
+| `resolvedModel.source` | `graph-override`, `app-config`, `settings-default`, `env-fallback`, or `bundle-default`. **This is the field that tells you where the route came from.** `app-config` means the model saved in Model settings; `bundle-default` means nothing is configured. |
 | `uvAvailable` | Whether `uv` is on `PATH`. |
 | `uvCacheDir` / `uvCacheWritable` | The resolved `UV_CACHE_DIR` and whether it can be written. |
 | `workspaceDir` / `workspaceWritable` | Where graphs and generated projects live, and whether it is writable. |
 | `webDistPresent` | Whether `web/dist/index.html` exists, i.e. whether `/` serves the canvas. |
 | `compileReady` | `true` only when `blockers` is empty. |
-| `blockers` | One human-readable sentence per reason a compile is not expected to succeed. |
+| `blockers` | One human-readable sentence per reason a compile is not expected to succeed. **Written for someone who has only ever seen this application**: they name "Model settings" and "Dry run mode", never a file or variable belonging to another component. |
+| `runReady` / `runBlockers` | Whether a **Run** is expected to work. Every compile blocker is also a run blocker, so this is the stricter of the two; `runBlockers` names each reason. |
+| `dryRun` | Whether the pipeline is in dry run (deterministic stubs + a keyless test model). A job already running keeps the value it started with; this field is the current setting. |
+| `dryRunForcedByEnv` | True when `SWARM_FAKE_FILL`/`SWARM_FAKE_GENERATE`/`SWARM_RUN_TEST_MODEL` is set to `1`; the in-app switch cannot turn it off. |
+| `modelConfigured` | Whether the user configured a model at all (any source other than the internal offline stand-in). |
+| `appConfigPath` / `appConfigError` | Where the app's own model settings live, and why they are not in effect — either the file could not be read, or the entry it holds cannot be used (an unknown provider, a malformed base URL). Resolution quietly falls through to the next source in both cases, so this field is how a fallthrough stops being silent. |
 
 `compileReady` is `false`, with a matching entry in `blockers`, when any of:
-the resolved model came from the bundle fallback (nothing the user actually
-configured), `uv` is not on `PATH`, the workspace is not writable, or
-`settings.yaml` exists but failed to parse. `status: 200` in all of these
+no model is configured **and** dry run is off; the resolved model has no usable
+credential (Phase 3's fill spends the model, so this gates Compile as well as
+Run — the same message is used by both); `uv` is not on `PATH`; the workspace is
+not writable; the app's own settings file could not be read or holds an entry
+that cannot be used; or an inherited settings file failed to parse.
+
+With dry run on, a fresh install is `compileReady: true` and `runReady: true`
+with no credential at all, and neither settings file can block it: dry run is
+read from the environment when the app's file cannot be parsed, and nothing in
+the pipeline reads a model route. Both problems remain visible in
+`appConfigError`/`settingsError` either way. `status: 200` in all of these
 cases — a blocker is reported, not raised.
 
 ## GET /api/models
 
-The model picker's data source: every route `settings.yaml` declares, plus
-the resolved default and where it came from.
+The model picker's data source: every route an inherited `settings.yaml`
+declares, the route configured in the app's own settings (`appRoute`, `null`
+when nothing is saved), plus the resolved default and where it came from.
+`appRoute` is classified exactly like an inherited route, so a picker can list
+it with the same enable/disable treatment.
 
 ```json
 {
+  "appRoute": {
+    "key": "openai",
+    "api": "openai-completions",
+    "hasExplicitModels": false,
+    "emission": "known-name",
+    "requiredExtra": "openai",
+    "unmappableReason": null,
+    "models": []
+  },
   "routes": [
     {
       "key": "amazon-bedrock",
@@ -142,6 +174,7 @@ the resolved default and where it came from.
 | `routes[].emission` | `known-name` (a prefixed string handed to `Agent`), `structural` (`OpenAIChatModel` + `OpenAIProvider` from `baseURL`), or `unmappable`. |
 | `routes[].requiredExtra` | The `pydantic-ai-slim[...]` extra the generated project needs for this route. |
 | `routes[].unmappableReason` | Why the route cannot be used, when `emission` is `unmappable`. |
+| `appRoute` | The route configured in the app's own Model settings, classified the same way, or `null` when nothing is saved. Reported separately from `routes` because the two have different lifetimes: a `routes` entry exists because someone edited a machine-wide file, while `appRoute` exists because the user configured it here. |
 | `settingsError` | Same value as in `/api/health`; explains an empty `routes` array. |
 
 A route whose `api` protocol has no PydanticAI counterpart *and* has no
@@ -160,6 +193,122 @@ Choosing the known-name path because the id matched would silently send the
 compile to the official DeepSeek API instead of the user's server: same
 string, wrong endpoint, no error. Hence `emission: "structural"` for every
 route with a `baseURL`, unconditionally.
+
+## Model settings
+
+Swarm Builder's *own* model configuration — the provider, model id and API key
+chosen in the app, plus the dry-run switch — lives in
+`<workspace>/settings.json` (override the path with `SWARM_CONFIG`). It is
+written with `0600` permissions inside the git-ignored workspace, and it ranks
+**above** an inherited `settings.yaml` and `SWARM_MODEL` in resolution: a model
+the user picked in this application by hand is a more specific statement of
+intent than a machine-wide default.
+
+Every read is fresh, like every other endpoint here: saving takes effect on the
+next request, with no restart.
+
+### GET /api/settings
+
+```json
+{
+  "configPath": "/Users/you/swarm-builder/workspace/settings.json",
+  "configError": null,
+  "model": {
+    "provider": "openai",
+    "model": "gpt-5.4-mini",
+    "baseUrl": null,
+    "reasoningEffort": null,
+    "hasApiKey": true,
+    "apiKeyHint": "…ab12"
+  },
+  "dryRun": false,
+  "dryRunForcedByEnv": false,
+  "dryRunEnvVars": [],
+  "providers": [
+    {
+      "key": "openai",
+      "label": "OpenAI",
+      "requiresApiKey": true,
+      "requiresBaseUrl": false,
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "defaultModel": "gpt-5.4-mini",
+      "models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5-mini", "gpt-4.1"],
+      "note": null,
+      "usable": true,
+      "unusableReason": null
+    }
+  ],
+  "resolvedDefault": { "provider": "openai", "model": "gpt-5.4-mini", "source": "app-config" },
+  "inheritedRoutes": 0,
+  "workspaceWritable": true
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `model` | The saved selection, or `null`. **The key is never part of any response** — only `hasApiKey` and a four-character `apiKeyHint`. |
+| `providers` | The curated catalog the screen renders: OpenAI, Anthropic, DeepSeek, Google Gemini, Groq, Mistral, Amazon Bedrock, and a custom OpenAI-compatible endpoint. `models` are suggestions validated against the installed `pydantic-ai`'s known-name union; any id the provider accepts also works. `usable`/`unusableReason` say whether *this server* can build a live model for the provider right now. |
+| `dryRun` | The dry-run switch, or `true` when the environment forces it. |
+| `dryRunForcedByEnv` / `dryRunEnvVars` | Whether `SWARM_FAKE_FILL`, `SWARM_FAKE_GENERATE` or `SWARM_RUN_TEST_MODEL` forced it on, and which. The UI locks its switch and explains why. |
+| `resolvedDefault` | What a compile would spend right now, identical to the field in `/api/health`. |
+| `inheritedRoutes` | How many routes an inherited `settings.yaml` contributes, for the screen's advanced footer. |
+| `configError` | Non-null when the file exists but could not be read or parsed. Resolution then falls through to the inherited/env sources, and `/api/health` reports the broken file as a blocker. |
+
+### PUT /api/settings
+
+```json
+{
+  "model": {
+    "provider": "openai",
+    "model": "gpt-5.4-mini",
+    "baseUrl": null,
+    "apiKey": "sk-…",
+    "clearApiKey": false,
+    "reasoningEffort": null
+  },
+  "dryRun": false,
+  "clearModel": false
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `model` | Omitted/`null` leaves the stored selection alone. An omitted `apiKey` **keeps** the stored key when the provider is unchanged; `clearApiKey: true` removes it; a non-empty `apiKey` replaces it. A key is never carried across a provider change. |
+| `dryRun` | Omitted/`null` leaves the switch alone. |
+| `clearModel` | `true` removes the in-app model (and its key), leaving dry run as the only configuration. |
+
+Responses: `200` with the `GET` body; `422` with a **list** of every problem
+found (an unknown provider; a blank model id; a base URL on a provider that
+does not take one, or a missing/malformed/credential-carrying one for the
+custom endpoint) — nothing is written by a rejected submission; `500` when the
+file cannot be written.
+
+A missing API key is deliberately **not** a save-time error: the key may
+already be in the server's environment, and `run_ready` in `/api/health` is
+what reports whether a usable credential exists right now.
+
+### POST /api/settings/test
+
+Makes one minimal real model call so a key can be checked before a compile
+spends anything on it. Every field is optional and falls back to the saved
+configuration, so `{}` tests exactly what a compile would use.
+
+```json
+{ "provider": "openai", "model": "gpt-5.4-mini", "baseUrl": null, "apiKey": "sk-…" }
+```
+
+`200` for every provider-side outcome, success or not:
+
+```json
+{ "ok": true, "detail": "the provider answered with 'gpt-5.4-mini'", "latencyMs": 1180, "model": "openai/gpt-5.4-mini" }
+```
+
+An auth failure, a timeout (20 s bound), an unmappable provider, nothing
+configured, or dry run being on are all `ok: false` with a human-readable
+`detail` — a result the screen shows next to the form, not an HTTP error. The
+key is scrubbed from `detail` if a provider ever echoes it, nothing is
+persisted, and an unsaved key under test is published only for the duration of
+the call.
 
 ## GET /api/templates
 
@@ -598,7 +747,7 @@ graph store before it is returned.
 |---|---|
 | `200` | Saved and returned. `warnings` are the reviewer's non-blocking findings. |
 | `422` | Empty/oversized description, or every attempt failed — the detail is `{message, problems, attempts}` with the last round's review findings. |
-| `503` | No model route configured (bundle default), an unmappable route, or the generator could not be imported. |
+| `503` | No model is configured (and dry run is off), an unmappable provider, or the generator could not be imported. The detail names the fix in this application's own terms. |
 
 `SWARM_FAKE_GENERATE=1` replaces the model with a deterministic
 sentence-per-step draft so the endpoint works with no credentials.
@@ -614,7 +763,7 @@ resolution and rides the compile's own `warning` frame:
 ```json
 {
   "code": "unknown_model_name",
-  "message": "the inherited default 'deepseek:deepseek-flash' is not a model name this pydantic-ai knows, so the exported project will fail when run with real credentials even though the keyless gate passes; check the 'deepseek-official' model id in your harness settings",
+  "message": "the default model 'deepseek:deepseek-flash' is not a model name this pydantic-ai knows, so the exported project will fail when run with real credentials even though the keyless gate passes; pick a different model for the 'deepseek-official' provider in Model settings",
   "nodeIds": []
 }
 ```
@@ -713,7 +862,7 @@ looks like on the wire:
 ```
 id: 3\r\n
 event: warning\r\n
-data: {"code":"unknown_model_name","message":"the inherited default 'deepseek:deepseek-flash' is not a model name this pydantic-ai knows, so the exported project will fail when run with real credentials even though the keyless gate passes; check the 'deepseek-official' model id in your harness settings","nodeIds":[],"eventId":3,"createdAt":"2026-09-17T01:18:32.711581+00:00"}\r\n
+data: {"code":"unknown_model_name","message":"the default model 'deepseek:deepseek-flash' is not a model name this pydantic-ai knows, so the exported project will fail when run with real credentials even though the keyless gate passes; pick a different model for the 'deepseek-official' provider in Model settings","nodeIds":[],"eventId":3,"createdAt":"2026-09-17T01:18:32.711581+00:00"}\r\n
 \r\n
 ```
 

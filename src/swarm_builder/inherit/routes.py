@@ -67,14 +67,17 @@ answers the second one.
 
 from __future__ import annotations
 
+import importlib
 import os
 from dataclasses import dataclass
-from typing import Literal, get_args
+from typing import Literal
 
-from pydantic_ai.models import KnownModelName, Model
+from pydantic_ai.models import Model
 
+from swarm_builder.appconfig import strip_userinfo
 from swarm_builder.compile import ResolvedModel
 from swarm_builder.inherit.settings import EffectiveModel, RouteConfig
+from swarm_builder.known_models import is_known_model_name as known_model_names_installed
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -139,10 +142,6 @@ class LiveModel:
     source_description: str
 
 
-#: Lazily-populated cache for :func:`_known_model_names`.
-_KNOWN_MODEL_NAMES_CACHE: frozenset[str] | None = None
-
-
 @dataclass(frozen=True)
 class RouteEmission:
     """Route-level (not model-id-level) classification, independent of
@@ -162,8 +161,11 @@ class RouteEmission:
 
 #: Static provider-key -> PydanticAI known-name prefix table. Covers
 #: every provider key this project's own settings/env can plausibly
-#: name. A provider key not in this table, with no baseURL to fall back
-#: on structurally, is unmappable.
+#: name -- including the keys the in-app model picker writes
+#: (``swarm_builder.providers``), so a route a user configured in the UI
+#: and a route inherited from ``settings.yaml`` take the same code path.
+#: A provider key not in this table, with no baseURL to fall back on
+#: structurally, is unmappable.
 _KNOWN_ROUTE_PREFIXES: dict[str, str] = {
     "amazon-bedrock": "bedrock",
     "bedrock": "bedrock",
@@ -171,6 +173,14 @@ _KNOWN_ROUTE_PREFIXES: dict[str, str] = {
     "deepseek": "deepseek",
     "anthropic": "anthropic",
     "openai": "openai",
+    "google": "google",
+    # The legacy alias: `google-gla` named the Gemini developer API before the
+    # prefix was shortened to `google`. Kept so an inherited route written
+    # against the older spelling keeps resolving instead of becoming
+    # unmappable.
+    "google-gla": "google",
+    "groq": "groq",
+    "mistral": "mistral",
 }
 
 #: api protocol -> the bracketed ``pydantic-ai-slim[...]`` extra a
@@ -186,12 +196,38 @@ _PROTOCOL_EXTRAS: dict[str, tuple[str, ...]] = {
 #: Fallback extras keyed by known-name PREFIX, used only when there is no
 #: ``api`` protocol available to look up in ``_PROTOCOL_EXTRAS`` (e.g. the
 #: env-fallback and bundle-default paths, which have no RouteConfig at
-#: all and therefore no ``api``).
+#: all and therefore no ``api``, and the in-app providers that declare no
+#: protocol because their prefix already decides the client).
 _PREFIX_EXTRAS_FALLBACK: dict[str, tuple[str, ...]] = {
     "bedrock": ("bedrock",),
     "deepseek": ("openai",),
     "anthropic": ("anthropic",),
     "openai": ("openai",),
+    "google": ("google",),
+    "groq": ("groq",),
+    "mistral": ("mistral",),
+}
+
+#: extra name -> the import that proves the extra is installed on *this*
+#: server. Only extras this project's own dependency set might be missing
+#: appear here: ``openai`` and ``bedrock`` are pinned in ``pyproject.toml``
+#: unconditionally, so checking them would be dead code, while everything
+#: else is listed so a stripped-down install reports "this server cannot run
+#: this provider" instead of a raw ``ImportError`` from deep inside the
+#: provider SDK. The value is the module actually imported, which is not
+#: always the extra's name (the ``google`` extra ships ``google.genai``).
+_EXTRA_IMPORT_MODULES: dict[str, str] = {
+    "anthropic": "anthropic",
+    "google": "google.genai",
+    "groq": "groq",
+    "mistral": "mistralai",
+    # openai and bedrock are pinned unconditionally in this project's own
+    # pyproject.toml, so the check can never fail for a correct install -- they
+    # are listed so that a *broken* install reports which provider package is
+    # unusable instead of surfacing a bare ImportError from deep inside the
+    # SDK, and so the map covers every extra this module can resolve.
+    "openai": "pydantic_ai.models.openai",
+    "bedrock": "pydantic_ai.models.bedrock",
 }
 
 #: Protocols that are OpenAI-compatible enough for the structural
@@ -306,26 +342,18 @@ def is_known_model_name(candidate: str) -> bool:
     the union is pinned to the installed ``pydantic-ai`` version and a
     genuinely newer provider model id would otherwise be refused.
 
+    Re-exported from :mod:`swarm_builder.known_models`, which owns the union:
+    the in-app provider registry (:mod:`swarm_builder.providers`) needs the
+    same answer, and neither module may import the other (see that module's
+    docstring).
+
     Args:
         candidate: A prefixed model name such as ``bedrock:us.anthropic...``.
 
     Returns:
         ``True`` when the name is in the installed union.
     """
-    return candidate in _known_model_names()
-
-
-def _known_model_names() -> frozenset[str]:
-    """The installed ``KnownModelName`` union, read once per process."""
-    global _KNOWN_MODEL_NAMES_CACHE
-    if _KNOWN_MODEL_NAMES_CACHE is None:
-        # Resolving the union member list is not free, and it cannot change
-        # while the process runs -- unlike settings.yaml, which is
-        # deliberately re-read per call.
-        value = getattr(KnownModelName, "__value__", KnownModelName)
-        _KNOWN_MODEL_NAMES_CACHE = frozenset(str(name) for name in get_args(value))
-    return _KNOWN_MODEL_NAMES_CACHE
-
+    return known_model_names_installed(candidate)
 
 def _resolve_emission(effective: EffectiveModel) -> _Emission:
     """The single decision procedure shared by :func:`build_live_model`
@@ -375,8 +403,8 @@ def _resolve_emission(effective: EffectiveModel) -> _Emission:
     if extras is None:
         extras = _PREFIX_EXTRAS_FALLBACK.get(prefix, ("openai",))
 
-    if "anthropic" in extras:
-        # Verify the extra is actually importable on THIS server, right
+    for extra in extras:
+        # Verify each extra is actually importable on THIS server, right
         # before returning success. Keyed off the EXTRAS this call
         # actually resolved -- not off `prefix` -- so a route whose
         # provider key happens to map to a different known-name prefix
@@ -385,23 +413,32 @@ def _resolve_emission(effective: EffectiveModel) -> _Emission:
         # from `route.api` via `_PROTOCOL_EXTRAS` independently of the
         # prefix, so the two can disagree, and it is `extras` -- what
         # will actually be imported/declared -- that must gate this
-        # check, not the provider-key-derived prefix. bedrock/openai are
-        # otherwise skipped: this project's own pyproject.toml already
-        # pins `pydantic-ai-slim[bedrock,openai]`, so those always
-        # import.
+        # check, not the provider-key-derived prefix. Extras this
+        # project's own pyproject.toml pins unconditionally (`openai`,
+        # `bedrock`) are absent from `_EXTRA_IMPORT_MODULES` and are
+        # therefore skipped: checking them would be dead code.
+        module_name = _EXTRA_IMPORT_MODULES.get(extra)
+        if module_name is None:
+            # Should be unreachable: the map above covers every extra
+            # _PROTOCOL_EXTRAS and _PREFIX_EXTRAS_FALLBACK can produce. Kept as
+            # a forward-compatibility escape hatch rather than an assertion, so
+            # adding a protocol without a matching entry degrades to the SDK's
+            # own error instead of refusing a route.
+            continue
         try:
-            import anthropic  # noqa: F401
-        except ImportError:
+            importlib.import_module(module_name)
+        except Exception:  # noqa: BLE001 - a broken install, not just a missing module
             raise UnmappableRouteError(
                 effective.provider,
                 api,
                 reason=(
-                    f"this server's own installed dependencies lack the "
-                    f"'{extras[0]}' extra needed to construct this route's "
-                    "model (a generated project still gets the extra "
-                    "declared in its own pyproject.toml -- this failure is "
-                    "about the SERVER's ability to run the compile agent "
-                    "against this route, not about the generated project)"
+                    f"this installation of Swarm Builder lacks the '{extra}' "
+                    f"provider package needed to run the compile against this "
+                    "route (a generated project still declares that extra in "
+                    "its own pyproject.toml -- this failure is about the "
+                    "server's own dependencies, not about the generated "
+                    "project). Run `uv sync` in a checkout, or use a "
+                    "different provider."
                 ),
             ) from None
 
@@ -433,10 +470,20 @@ def build_live_model(effective: EffectiveModel) -> LiveModel:
         from pydantic_ai.models.openai import OpenAIChatModel
         from pydantic_ai.providers.openai import OpenAIProvider
 
+        # The key a user typed into the app's own settings wins over the
+        # environment: it is the more recent and more specific statement of
+        # intent, and it is what `runtime.publish_secrets` publishes under
+        # this same variable name anyway. Falling back to the environment
+        # keeps every pre-existing route (harness-, SWARM_MODEL- and
+        # env-configured) working exactly as before.
         api_key = (
-            os.environ.get(effective.api_key_env, _PLACEHOLDER_API_KEY)
-            if effective.api_key_env
-            else _PLACEHOLDER_API_KEY
+            effective.api_key
+            or (
+                os.environ.get(effective.api_key_env, _PLACEHOLDER_API_KEY)
+                if effective.api_key_env
+                else None
+            )
+            or _PLACEHOLDER_API_KEY
         )
         model = OpenAIChatModel(
             effective.model,
@@ -483,7 +530,11 @@ def to_resolved_model(effective: EffectiveModel) -> ResolvedModel:
     emission = _resolve_emission(effective)
 
     if emission.kind == "structural":
-        base_url = emission.base_url
+        # Defence in depth: a base URL is spliced into a generated project's
+        # deps.py and .env.example, so credentials embedded in it
+        # (`https://user:key@host`) must never reach either. Saving rejects
+        # such a URL outright; this catches one that reached disk by hand.
+        base_url = strip_userinfo(emission.base_url)
         model_id_literal = repr(effective.model)
         base_url_literal = repr(base_url)
         api_key_env_default_literal = repr(effective.api_key_env or "SWARM_API_KEY")
@@ -542,6 +593,17 @@ def to_resolved_model(effective: EffectiveModel) -> ResolvedModel:
         "def _resolve_default_model() -> str:\n"
         '    return os.environ.get("SWARM_MODEL") or DEFAULT_MODEL\n'
     )
+    env_lines = [f"SWARM_MODEL={emission.prefix}:{effective.model}"]
+    if effective.source == "app-config" and effective.api_key_env:
+        # The route came from this application's own model settings, so the
+        # exported project's reader has never seen that screen and would not
+        # otherwise know which variable to set. A commented line names the
+        # variable -- never the value, which is never written to disk in a
+        # generated project at all.
+        env_lines.append(
+            f"# Credential for the model above (set it in your shell or CI): "
+            f"{effective.api_key_env}="
+        )
     return ResolvedModel(
         helper_source=helper_source,
         default_factory_name="_resolve_default_model",
@@ -549,7 +611,7 @@ def to_resolved_model(effective: EffectiveModel) -> ResolvedModel:
         pyproject_extras=emission.extras,
         # As above: the inherited route is recorded in the exported
         # project's own .env.example, not only in its README.
-        env_lines=(f"SWARM_MODEL={emission.prefix}:{effective.model}",),
+        env_lines=tuple(env_lines),
         readme_model_note=(
             f"Inherited default model: {emission.prefix}:{effective.model} "
             f"(source: {effective.source}; override with SWARM_MODEL)."

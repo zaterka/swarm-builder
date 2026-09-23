@@ -20,9 +20,11 @@ from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict
 from pydantic.alias_generators import to_camel
 
-from swarm_builder import __version__
+from swarm_builder import __version__, runtime
+from swarm_builder.appconfig import config_problems, load_config
 from swarm_builder.config import (
     REPO_ROOT,
+    get_app_config_path,
     get_dsh_home,
     get_uv_cache_dir,
     get_workspace_dir,
@@ -84,6 +86,20 @@ class HealthResponse(_CamelModel):
     #: environment. ``run_blockers`` names each reason.
     run_ready: bool
     run_blockers: list[str]
+    #: Dry run: the pipeline uses built-in stubs and keyless test models, so
+    #: no credential is needed at all. ``dry_run_forced_by_env`` says the
+    #: environment locked it on (the switch cannot turn it off).
+    dry_run: bool
+    dry_run_forced_by_env: bool
+    #: Whether a model route is configured by the user (in this application's
+    #: own model settings, an inherited settings file, or the environment).
+    #: ``False`` means the resolved model is the internal offline stand-in
+    #: that nobody chose.
+    model_configured: bool
+    #: Where this application's own model settings live, and why they could
+    #: not be read when they exist but are broken.
+    app_config_path: str
+    app_config_error: str | None
 
 
 def _path_writable(path: Path) -> bool:
@@ -110,16 +126,23 @@ def _path_writable(path: Path) -> bool:
 
 @router.get("/health", response_model=HealthResponse)
 def get_health() -> HealthResponse:
-    """Report server version, resolved model/settings state, and
-    whether a compile is currently expected to succeed.
+    """Report server version, resolved model/settings state, and whether
+    a compile is currently expected to succeed.
 
     ``compile_ready`` is ``False`` -- with a human-readable string
     appended to ``blockers`` for each contributing reason -- whenever
-    any of: the resolved default model came from the bundle fallback
-    (nothing the user actually configured); ``uv`` is not on ``PATH``;
-    the resolved workspace directory is not writable; or
-    ``settings.yaml`` exists but failed to parse/read. Otherwise
-    ``compile_ready`` is ``True`` and ``blockers`` is empty.
+    any of: no model has been configured *and* dry run is off; ``uv`` is
+    not on ``PATH``; the resolved workspace directory is not writable;
+    this application's own settings file exists but could not be read;
+    or an inherited settings file exists but could not be parsed.
+    Otherwise ``compile_ready`` is ``True`` and ``blockers`` is empty.
+
+    Every message here is written for someone who has only ever seen this
+    application: they name this application's own controls ("Model settings",
+    "Dry run mode") rather than a file or variable belonging to something
+    else. The inherited configuration is still read -- a user who has one
+    keeps working exactly as before -- but it is never presented as a
+    requirement.
     """
     dsh_home = get_dsh_home()
     settings = read_settings(dsh_home)
@@ -129,6 +152,17 @@ def get_health() -> HealthResponse:
     resolved_model = ResolvedModelSummary(
         provider=effective.provider, model=effective.model, source=effective.source
     )
+
+    app_config = load_config()
+    app_config_error = app_config.error if app_config is not None else None
+    # An entry that parsed but cannot be used is reported too: resolution
+    # ignores it in favour of the next source, which must not be silent.
+    app_config_problems = config_problems(app_config)
+    dry_run = runtime.dry_run_active(app_config)
+    dry_run_forced = runtime.dry_run_forced_by_env()
+    # "bundle-default" is the internal offline stand-in: it means nothing the
+    # user chose, so it is reported as "not configured" rather than as a model.
+    model_configured = effective.source != "bundle-default"
 
     uv_available = shutil.which("uv") is not None
 
@@ -140,25 +174,52 @@ def get_health() -> HealthResponse:
 
     web_dist_present = (REPO_ROOT / "web" / "dist" / "index.html").exists()
 
+    # A credential is needed by Phase 3's fill, not only by Run, so a missing
+    # one is a compile blocker as well: enabling Compile and then failing on an
+    # authentication error is a worse experience than being told up front. In
+    # dry run nothing needs a credential, so neither check applies.
+    missing_credential = None if dry_run else credential_blocker(effective)
+
     blockers: list[str] = []
-    if effective.source == "bundle-default":
+    if not model_configured and not dry_run:
         blockers.append(
-            "No model route configured: no agent-default-model in "
-            "settings.yaml and no SWARM_MODEL set. Configure "
-            "$DSH_HOME/settings.yaml's agent-default-model section, or "
-            "set SWARM_MODEL."
+            "No model is configured yet. Choose a provider and add your API key "
+            "in Model settings, or turn on Dry run mode to build and run offline."
         )
+    if missing_credential is not None:
+        blockers.append(missing_credential)
     if not uv_available:
         blockers.append("'uv' is not on PATH; the compile validation gate requires it.")
     if not workspace_writable:
         blockers.append(f"workspace directory is not writable: {workspace_dir}")
-    if settings_error is not None:
-        blockers.append(f"settings.yaml could not be read: {settings_error}")
 
+    # The two configuration-file problems are reported only when they actually
+    # stand in the way. In dry run neither a broken app settings file nor a
+    # broken inherited one changes what the pipeline does (the switch itself is
+    # read from the environment when the file cannot be parsed), so blocking on
+    # them would disable work that would succeed. They remain visible in
+    # ``appConfigError``/``settingsError`` for the screen to show.
+    if not dry_run:
+        if app_config_error is not None:
+            blockers.append(
+                f"Swarm Builder's model settings could not be read: {app_config_error}"
+            )
+        elif app_config_problems:
+            blockers.append(
+                "Swarm Builder's model settings are not usable ("
+                + "; ".join(app_config_problems)
+                + ") — open Model settings to fix them, or turn on Dry run mode."
+            )
+        if settings_error is not None:
+            # The advanced path only: this names a file the user owns, and it
+            # is reported because a model they configured there is ignored.
+            blockers.append(
+                f"the inherited model settings file could not be read: {settings_error}"
+            )
+
+    # Every compile blocker is also a run blocker; a credential one is already
+    # included above.
     run_blockers = list(blockers)
-    missing_credential = credential_blocker(effective)
-    if missing_credential is not None:
-        run_blockers.append(missing_credential)
 
     return HealthResponse(
         version=__version__,
@@ -175,6 +236,11 @@ def get_health() -> HealthResponse:
         blockers=blockers,
         run_ready=not run_blockers,
         run_blockers=run_blockers,
+        dry_run=dry_run,
+        dry_run_forced_by_env=dry_run_forced,
+        model_configured=model_configured,
+        app_config_path=str(get_app_config_path()),
+        app_config_error=app_config_error,
     )
 
 
@@ -182,12 +248,20 @@ def get_health() -> HealthResponse:
 #: one present counts). Only consulted when the route names no explicit
 #: ``api_key_env``; a prefix absent here yields no blocker, because this
 #: check must never wrongly disable Run for a provider it does not know.
+#:
+#: Kept in step with :data:`swarm_builder.providers.PROVIDERS` -- the in-app
+#: model picker's registry, which the tests cross-check against this table --
+#: so a provider a user can select in the UI is also one whose credential
+#: state Run can report.
 _PROVIDER_CREDENTIAL_ENV_VARS: dict[str, tuple[str, ...]] = {
     "openai": ("OPENAI_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
     "deepseek": ("DEEPSEEK_API_KEY",),
     "groq": ("GROQ_API_KEY",),
     "mistral": ("MISTRAL_API_KEY",),
+    "google": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    # The legacy spelling of the Gemini developer-API prefix, still accepted
+    # for a route inherited from an older settings file.
     "google-gla": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
     "google-vertex": ("GOOGLE_APPLICATION_CREDENTIALS",),
     "bedrock": (
@@ -203,17 +277,27 @@ _PROVIDER_CREDENTIAL_ENV_VARS: dict[str, tuple[str, ...]] = {
 def credential_blocker(effective: EffectiveModel) -> str | None:
     """Name the missing credential for the resolved route, or ``None``.
 
-    A route with an explicit ``api_key_env`` needs exactly that variable.
-    A known-name route (``<prefix>:<id>``) needs one of PydanticAI's own
+    A route with an explicit ``api_key_env`` needs exactly that variable. A
+    known-name route (``<prefix>:<id>``) needs one of PydanticAI's own
     variables for that prefix. A bedrock-protocol route with an
     ``aws_profile`` is treated as configured.
+
+    The message names the fix in this application's own terms -- "add one in
+    Model settings" -- because that is where a user can actually act; the
+    shell-export and ``.env`` alternatives are documented in the guide for
+    people who chose the advanced path.
     """
+    if effective.api_key:
+        # A key configured in the app's own model settings: present by
+        # construction (runtime.publish_secrets has already published it).
+        return None
+
     if effective.api_key_env:
         if os.environ.get(effective.api_key_env):
             return None
         return (
-            f"Run disabled: the resolved route reads its API key from "
-            f"${effective.api_key_env}, which is not set in the server's environment."
+            f"No API key for the {effective.provider!r} model yet. Add one in Model "
+            f"settings, or turn on Dry run mode to work offline."
         )
 
     route = effective.route
@@ -234,6 +318,7 @@ def credential_blocker(effective: EffectiveModel) -> str | None:
     if any(os.environ.get(name) for name in candidates):
         return None
     return (
-        f"Run disabled: no credential for the {prefix!r} provider in the server's "
-        f"environment (set one of {', '.join(candidates)})."
+        f"No credential for the {effective.provider!r} model in this server's "
+        f"environment. Add an API key in Model settings, or turn on Dry run mode to "
+        f"work offline."
     )

@@ -22,6 +22,7 @@ regardless, and that the base_url actually wired into the constructed
 from __future__ import annotations
 
 import ast
+from dataclasses import replace
 
 import pytest
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -36,6 +37,7 @@ from swarm_builder.inherit.routes import (
     to_resolved_model,
 )
 from swarm_builder.inherit.settings import EffectiveModel, RouteConfig
+from swarm_builder.providers import PROVIDERS_BY_KEY
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -259,6 +261,143 @@ def test_anthropic_protocol_extras_no_base_url() -> None:
             build_live_model(effective)
         assert "anthropic" in str(exc_info.value)
         assert "anthropic" in exc_info.value.provider
+
+
+def test_missing_provider_extra_is_refused_with_an_app_native_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The "this server's dependencies lack the provider package" path.
+
+    It cannot be exercised by an uninstalled dependency any more -- every
+    provider the picker offers is pinned in ``pyproject.toml`` -- so the
+    import is poisoned instead. The message must name this application's own
+    dependency and its fix; it must never mention a component outside it.
+    """
+    import swarm_builder.inherit.routes as routes_module
+
+    route = _route("mistral", api=None, base_url=None)
+    effective = _effective(provider="mistral", model="mistral-large-latest", route=route)
+
+    real_import = routes_module.importlib.import_module
+
+    def _fail(name: str, *args: object, **kwargs: object) -> object:
+        if name == "mistralai":
+            raise ImportError("simulated: not installed")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(routes_module.importlib, "import_module", _fail)
+
+    with pytest.raises(UnmappableRouteError) as exc_info:
+        build_live_model(effective)
+
+    message = str(exc_info.value)
+    assert "'mistral' provider package" in message
+    assert "uv sync" in message
+    for foreign in ("settings.yaml", "DSH_HOME", "harness"):
+        assert foreign not in message
+
+
+# ---------------------------------------------------------------------------
+# 5b. The in-app picker's provider keys resolve through the same tables.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("provider", "prefix"),
+    [
+        ("openai", "openai"),
+        ("anthropic", "anthropic"),
+        ("deepseek", "deepseek"),
+        ("google", "google"),
+        ("groq", "groq"),
+        ("mistral", "mistral"),
+        ("bedrock", "bedrock"),
+    ],
+)
+def test_picker_provider_keys_emit_known_names(provider: str, prefix: str) -> None:
+    spec = PROVIDERS_BY_KEY[provider]
+    route = _route(provider, api=spec.api, base_url=None, api_key_env=spec.api_key_env)
+    effective = _effective(
+        provider=provider, model=spec.default_model or spec.models[0], route=route
+    )
+
+    live = build_live_model(effective)
+
+    assert live.model == f"{prefix}:{spec.default_model or spec.models[0]}"
+    assert classify_route(route).emission == "known-name"
+
+
+def test_legacy_google_gla_prefix_still_resolves() -> None:
+    """An inherited route written against the older spelling must not become
+    unmappable just because the picker writes the current prefix."""
+    route = _route("google-gla", api=None, base_url=None)
+    effective = _effective(provider="google-gla", model="gemini-2.5-flash", route=route)
+    assert build_live_model(effective).model == "google:gemini-2.5-flash"
+
+
+def test_app_config_key_wins_over_a_stale_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The structural path takes the key the user configured in the app when
+    one is present, and falls back to the environment otherwise."""
+    monkeypatch.setenv("CUSTOM_KEY", "env-key")
+    route = _route(
+        "custom", api=None, base_url="http://localhost:8000/v1", api_key_env="CUSTOM_KEY"
+    )
+    effective = _effective(
+        provider="custom",
+        model="qwen3",
+        route=route,
+        base_url="http://localhost:8000/v1",
+        api_key_env="CUSTOM_KEY",
+        source="app-config",
+    )
+    effective = replace(effective, api_key="app-key")
+
+    live = build_live_model(effective)
+
+    assert isinstance(live.model, OpenAIChatModel)
+    assert live.model.client.api_key == "app-key"
+
+
+def test_app_config_route_records_the_credential_variable_in_env_example() -> None:
+    """The exported project's reader never saw the app's model settings, so
+    its .env.example names the variable to set -- and never a key value."""
+    route = _route("openai", api="openai-completions", base_url=None, api_key_env="OPENAI_API_KEY")
+    effective = replace(
+        _effective(
+            provider="openai",
+            model="gpt-5.4-mini",
+            route=route,
+            api_key_env="OPENAI_API_KEY",
+            source="app-config",
+        ),
+        api_key="sk-should-never-be-rendered",
+    )
+
+    resolved = to_resolved_model(effective)
+
+    assert "SWARM_MODEL=openai:gpt-5.4-mini" in resolved.env_lines
+    assert any("OPENAI_API_KEY=" in line for line in resolved.env_lines)
+    assert "sk-should-never-be-rendered" not in "\n".join(resolved.env_lines)
+    assert "sk-should-never-be-rendered" not in resolved.helper_source
+
+
+def test_base_url_userinfo_is_stripped_when_rendering() -> None:
+    """Defence in depth for a base URL that reached disk by hand: it is
+    spliced into deps.py and .env.example verbatim."""
+    route = _route("custom", api=None, base_url="https://user:sk-leak@host/v1")
+    effective = _effective(
+        provider="custom",
+        model="qwen3",
+        route=route,
+        base_url="https://user:sk-leak@host/v1",
+    )
+
+    resolved = to_resolved_model(effective)
+
+    assert "sk-leak" not in resolved.helper_source
+    assert "https://host/v1" in resolved.helper_source
 
 
 # ---------------------------------------------------------------------------

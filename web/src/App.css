@@ -23,7 +23,7 @@
   align-items: center;
   gap: 10px;
   flex: 0 0 auto;
-  height: 46px;
+  height: var(--sb-toolbar-height);
   padding: 0 12px;
   background: var(--sb-surface);
   border-bottom: 1px solid var(--sb-border);
@@ -578,9 +578,13 @@ button.sb-finding.sb-finding-warning:hover:not(:disabled) {
   flex-direction: column;
   justify-content: safe center;
   max-width: 716px;
-  min-height: 100vh;
+  /* Minus the top bar, which is a sibling: `100vh` here would overflow the
+     window by exactly the bar's height and put a scrollbar on every short
+     page. The reduced top padding keeps the hero's breathing room now that
+     the bar occupies the first 46px. */
+  min-height: calc(100vh - var(--sb-toolbar-height));
   margin: 0 auto;
-  padding: 56px 24px 64px;
+  padding: 32px 24px 64px;
 }
 
 .sb-start-hero {
@@ -1166,3 +1170,201 @@ span.sb-run-failed {
   padding-top: 10px;
   border-top: 1px dashed var(--sb-border);
 }
+
+/* ---------- Model settings (PLAN-V3) ----------
+   One screen a brand-new user needs: provider, key, dry run. It reuses the
+   app's existing tokens rather than introducing a second visual language, and
+   the modal is a plain fixed overlay because the shell has no router. */
+
+.sb-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgb(23 26 31 / 42%);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  overflow-y: auto;
+  z-index: 40;
+}
+
+.sb-modal {
+  width: min(560px, 100%);
+  background: var(--sb-surface);
+  border: 1px solid var(--sb-border-strong);
+  border-radius: 10px;
+  box-shadow: var(--sb-shadow-md, var(--sb-shadow-sm));
+  padding: 20px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.sb-modal-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.sb-modal-head h2 {
+  margin: 0;
+  font-size: 17px;
+  letter-spacing: -0.015em;
+}
+
+.sb-settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0 4px;
+  border-top: 1px solid var(--sb-border);
+}
+
+.sb-settings-section h3 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--sb-text-muted);
+}
+
+.sb-settings-section select,
+.sb-settings-section input {
+  font: inherit;
+  padding: 7px 9px;
+  border: 1px solid var(--sb-border-strong);
+  border-radius: 6px;
+  background: var(--sb-surface);
+  color: var(--sb-text);
+  width: 100%;
+}
+
+.sb-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--sb-text-muted);
+}
+
+.sb-switch {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13.5px;
+  color: var(--sb-text);
+}
+
+.sb-switch input {
+  width: auto;
+}
+
+.sb-settings-advanced {
+  border-top: 1px solid var(--sb-border);
+  padding-top: 10px;
+}
+
+.sb-settings-advanced h4 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--sb-text-subtle);
+}
+
+/* Warn rather than alarm: a dry run is a supported, deliberate mode. */
+.sb-dry-run-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--sb-warn);
+  background: var(--sb-warn-soft);
+  border: 1px solid var(--sb-warn-border);
+  white-space: nowrap;
+}
+
+.sb-finding-ok {
+  background: var(--sb-success-soft);
+  border-color: var(--sb-success);
+  color: var(--sb-success);
+}
+
+/* ---------- The model, on the start screen (PLAN-V3.2) ----------
+   Chrome at the top (the same bar the workspace has) plus a notice in the body
+   that appears only when something needs doing. The steady state is quiet: a
+   read-out between "New graph" and "Describe your workflow" read as a step in
+   the page's flow rather than as chrome. */
+
+/* The bar composes `.sb-toolbar` rather than restating its height, surface and
+   border: one visual fact, one place. It only adds the alignment this screen
+   needs (content to the right, since there is no back button or graph name). */
+.sb-toolbar-start {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.sb-model-bar-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sb-text-subtle);
+}
+
+.sb-model-bar-summary {
+  font-size: 12.5px;
+  color: var(--sb-text-muted);
+  /* Long provider/model pairs shrink before the button does. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Not configured, no credential, or an unreadable settings file: the summary
+   carries the tone, the notice in the body carries the words. */
+.sb-toolbar-start[data-state='warn'] .sb-model-bar-summary,
+.sb-toolbar-start[data-state='cred'] .sb-model-bar-summary,
+.sb-toolbar-start[data-state='config'] .sb-model-bar-summary {
+  color: var(--sb-warn);
+  font-weight: 600;
+}
+
+/* The action never wraps away, whatever the summary does. */
+.sb-model-bar-action {
+  flex: 0 0 auto;
+}
+
+/* The notice: the old first-run banner's shape and tokens, now shown only for
+   the three states that need action. */
+.sb-model-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 24px auto 0;
+  padding: 14px 18px;
+  max-width: 780px;
+  background: var(--sb-warn-soft);
+  border: 1px solid var(--sb-warn-border);
+  border-radius: 8px;
+}
+
+.sb-model-notice-main {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sb-model-notice-main .sb-hint {
+  margin: 0;
+}
+
+.sb-model-notice > button {
+  flex: 0 0 auto;
+}
+
