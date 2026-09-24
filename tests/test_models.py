@@ -9,6 +9,10 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
+from swarm_builder.known_models import (
+    THINKING_MODEL_MAX_OUTPUT_TOKENS,
+    default_max_output_tokens,
+)
 from swarm_builder.models import (
     PORT_TYPE_ANNOTATIONS,
     PORT_TYPE_IMPORTS,
@@ -351,3 +355,50 @@ class TestJsonRoundTrip:
         assert PORT_TYPE_IMPORTS["json"] == "from typing import Any"
         assert PORT_TYPE_IMPORTS["str"] is None
         assert PORT_TYPE_IMPORTS["list[str]"] is None
+
+
+# ---------------------------------------------------------------------------
+# default_max_output_tokens (PLAN-ATTACHMENTS-CLARIFY.md, provider testing)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # Thinking models whose provider default output budget is too small for a
+        # large structured answer: measured at 5135 output tokens for one draft.
+        ("claude-sonnet-5", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        ("anthropic:claude-opus-5", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        ("us.anthropic.claude-sonnet-4-6", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        ("EU.ANTHROPIC.CLAUDE-HAIKU-4-5", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        # Everything else keeps its provider default: this rule exists to fix a
+        # known failure, not to raise every route's budget.
+        ("deepseek-flash", None),
+        ("deepseek-v4.1-flash", None),
+        ("gpt-5.6-sol", None),
+        ("gemini-2.5-flash", None),
+        ("", None),
+    ],
+)
+def test_default_max_output_tokens_only_overrides_where_it_must(
+    model: str, expected: int | None
+) -> None:
+    assert default_max_output_tokens(model) == expected
+
+
+def test_the_agents_carry_the_budget_when_one_is_given() -> None:
+    """The value has to reach ``Agent(model_settings=...)``, not just the route."""
+    from swarm_builder.compile import clarify as clarify_module
+    from swarm_builder.compile import generate as generate_module
+
+    draft_agent = generate_module.build_generate_agent("test:model", max_output_tokens=16384)
+    clarify_agent = clarify_module.build_clarify_agent("test:model", max_output_tokens=16384)
+    assert draft_agent.model_settings["max_tokens"] == 16384
+    assert clarify_agent.model_settings["max_tokens"] == 16384
+
+    # And an unset budget leaves the provider default alone.
+    default_draft = generate_module.build_generate_agent("test:model")
+    default_clarify = clarify_module.build_clarify_agent("test:model")
+    # `None` here means "no explicit settings", i.e. the provider default stands.
+    assert (default_draft.model_settings or {}).get("max_tokens") is None
+    assert (default_clarify.model_settings or {}).get("max_tokens") is None

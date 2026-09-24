@@ -794,13 +794,54 @@
         }
       }
     },
+    "/api/graphs/generate/clarify": {
+      "post": {
+        "tags": [
+          "generate"
+        ],
+        "summary": "Clarify Graph Route",
+        "description": "Decide whether ``body.description`` needs questions before drafting.\n\nRaises:\n    HTTPException: 422 when an attachment id is unknown or expired; 502/503\n        for model setup and upstream failures, mirroring ``/generate``.",
+        "operationId": "clarify_graph_route_api_graphs_generate_clarify_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClarifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClarifyResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "the description or an attachment is unusable"
+          },
+          "502": {
+            "description": "the model API refused or failed the request, or answered unusably"
+          },
+          "503": {
+            "description": "no usable route or credential, or the generator is unavailable"
+          }
+        }
+      }
+    },
     "/api/graphs/generate": {
       "post": {
         "tags": [
           "generate"
         ],
         "summary": "Generate Graph Route",
-        "description": "Generate, save, and return a graph for ``body.description``.\n\nRaises:\n    HTTPException: 422 when every attempt failed (the detail carries the\n        last review findings as ``problems``); 503 when the resolved\n        route is unmappable, no model is configured, or the generator\n        cannot be imported; 500 when the graph cannot be saved.",
+        "description": "Generate, save, and return a graph for ``body.description``.\n\nRaises:\n    HTTPException: 422 when every attempt failed (the detail carries the\n        last review findings as ``problems``) or an attachment expired; 413\n        when the attachments exceed the size cap; 503 when the resolved\n        route is unmappable, no model is configured, or the generator\n        cannot be imported; 500 when the graph cannot be saved.",
         "operationId": "generate_graph_route_api_graphs_generate_post",
         "requestBody": {
           "content": {
@@ -823,6 +864,9 @@
               }
             }
           },
+          "413": {
+            "description": "the attachments exceed the per-request size cap"
+          },
           "422": {
             "description": "the model could not produce a review-clean graph"
           },
@@ -831,6 +875,96 @@
           },
           "503": {
             "description": "no usable route or credential, or the generator is unavailable"
+          }
+        }
+      }
+    },
+    "/api/graphs/attachments": {
+      "post": {
+        "tags": [
+          "attachments"
+        ],
+        "summary": "Upload Attachment Route",
+        "description": "Store one uploaded file and return its id and a preview of what was read.\n\nRaises:\n    HTTPException: 413 for an oversized body, 415 for an unsupported type,\n        422 for an unreadable file or an image under a non-vision model, 503\n        when the parsers are missing or no model is configured (images only).",
+        "operationId": "upload_attachment_route_api_graphs_attachments_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_attachment_route_api_graphs_attachments_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentUploadResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "the file exceeds the per-file size cap"
+          },
+          "415": {
+            "description": "the file type is not supported"
+          },
+          "422": {
+            "description": "the file could not be read, or the model cannot read images"
+          },
+          "503": {
+            "description": "the attachment readers are unavailable, or no model is configured"
+          }
+        }
+      }
+    },
+    "/api/graphs/attachments/{attachmentId}": {
+      "delete": {
+        "tags": [
+          "attachments"
+        ],
+        "summary": "Delete Attachment Route",
+        "description": "Discard one attachment (idempotent for the caller, 404 when unknown).\n\nRaises:\n    HTTPException: 404 when the id is malformed, unknown, or already gone.",
+        "operationId": "delete_attachment_route_api_graphs_attachments__attachmentId__delete",
+        "parameters": [
+          {
+            "name": "attachmentId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Attachmentid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentDeleteResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "no such attachment"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
@@ -879,6 +1013,175 @@
         "title": "AgentSpec",
         "description": "Present on ``kind=\"agent\"`` nodes: instructions, tools, delegation,\nand optional structured output for the generated agent factory.\n\n``output_schema`` is a JSON Schema object. Its values are typed as\n``object`` rather than ``Any``: the *values* are arbitrary, but the\ncontainer is not, and ``Any`` would also silently accept a list or a\nscalar where a schema object was meant."
       },
+      "AttachmentDeleteResponse": {
+        "properties": {
+          "attachmentId": {
+            "type": "string",
+            "title": "Attachmentid"
+          },
+          "deleted": {
+            "type": "boolean",
+            "title": "Deleted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachmentId",
+          "deleted"
+        ],
+        "title": "AttachmentDeleteResponse"
+      },
+      "AttachmentOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "csv",
+              "xlsx",
+              "pptx",
+              "image"
+            ],
+            "title": "Kind"
+          },
+          "mediaType": {
+            "type": "string",
+            "title": "Mediatype"
+          },
+          "bytes": {
+            "type": "integer",
+            "title": "Bytes"
+          },
+          "chars": {
+            "type": "integer",
+            "title": "Chars"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          },
+          "preview": {
+            "type": "string",
+            "title": "Preview"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expiresat"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "filename",
+          "kind",
+          "mediaType",
+          "bytes",
+          "chars",
+          "truncated",
+          "notes",
+          "preview",
+          "expiresAt"
+        ],
+        "title": "AttachmentOut",
+        "description": "One attachment, as the panel needs it."
+      },
+      "AttachmentSummaryOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "csv",
+              "xlsx",
+              "pptx",
+              "image"
+            ],
+            "title": "Kind"
+          },
+          "chars": {
+            "type": "integer",
+            "title": "Chars"
+          },
+          "truncated": {
+            "type": "boolean",
+            "title": "Truncated"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "filename",
+          "kind",
+          "chars",
+          "truncated",
+          "notes"
+        ],
+        "title": "AttachmentSummaryOut",
+        "description": "One attachment as it was used by a generation."
+      },
+      "AttachmentUploadResponse": {
+        "properties": {
+          "attachment": {
+            "$ref": "#/components/schemas/AttachmentOut"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "type": "object",
+        "required": [
+          "attachment",
+          "warnings"
+        ],
+        "title": "AttachmentUploadResponse"
+      },
+      "Body_upload_attachment_route_api_graphs_attachments_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_attachment_route_api_graphs_attachments_post"
+      },
       "BranchEdge": {
         "properties": {
           "kind": {
@@ -914,6 +1217,167 @@
         ],
         "title": "BranchEdge",
         "description": "One arm of a decision's dispatch, drawn on the canvas from the\n``decision`` node to a branch target. ``match`` must correspond to\none entry in the decision node's :class:`DecisionSpec.branches`."
+      },
+      "ClarifyAnswerInRaw": {
+        "properties": {
+          "questionId": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Questionid"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 600
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
+          "answer": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Answer"
+          }
+        },
+        "type": "object",
+        "required": [
+          "questionId",
+          "answer"
+        ],
+        "title": "ClarifyAnswerInRaw",
+        "description": "One answer from the panel."
+      },
+      "ClarifyOptionOut": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label"
+        ],
+        "title": "ClarifyOptionOut"
+      },
+      "ClarifyQuestionOut": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "why": {
+            "type": "string",
+            "title": "Why"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/ClarifyOptionOut"
+            },
+            "type": "array",
+            "title": "Options"
+          },
+          "recommended": {
+            "type": "string",
+            "title": "Recommended"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "question",
+          "why",
+          "options",
+          "recommended"
+        ],
+        "title": "ClarifyQuestionOut"
+      },
+      "ClarifyRequest": {
+        "properties": {
+          "description": {
+            "type": "string",
+            "maxLength": 8000,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "attachmentIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 5,
+            "title": "Attachmentids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "description"
+        ],
+        "title": "ClarifyRequest",
+        "description": "Body of ``POST /api/graphs/generate/clarify``.\n\nNo ``modelOverride``: the analysis pass uses the same resolved route as the\ndraft, so model selection happens in exactly one place for this flow."
+      },
+      "ClarifyResponse": {
+        "properties": {
+          "needsClarification": {
+            "type": "boolean",
+            "title": "Needsclarification"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/ClarifyQuestionOut"
+            },
+            "type": "array",
+            "title": "Questions"
+          },
+          "assumptions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Assumptions"
+          },
+          "understanding": {
+            "type": "string",
+            "title": "Understanding"
+          },
+          "model": {
+            "$ref": "#/components/schemas/GenerateModelOut"
+          },
+          "dryRun": {
+            "type": "boolean",
+            "title": "Dryrun"
+          }
+        },
+        "type": "object",
+        "required": [
+          "needsClarification",
+          "questions",
+          "assumptions",
+          "understanding",
+          "model",
+          "dryRun"
+        ],
+        "title": "ClarifyResponse"
       },
       "CompileSnapshotResponse": {
         "properties": {
@@ -1248,6 +1712,24 @@
                 "type": "null"
               }
             ]
+          },
+          "attachmentIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 5,
+            "title": "Attachmentids",
+            "description": "Ids returned by POST /api/graphs/attachments."
+          },
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/ClarifyAnswerInRaw"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "title": "Answers",
+            "description": "Answers to the clarify pass' questions; authoritative for the draft."
           }
         },
         "type": "object",
@@ -1279,6 +1761,13 @@
           "dryRun": {
             "type": "boolean",
             "title": "Dryrun"
+          },
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/AttachmentSummaryOut"
+            },
+            "type": "array",
+            "title": "Attachments"
           }
         },
         "type": "object",

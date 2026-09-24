@@ -5,6 +5,10 @@
 // the SSE frame vocabulary from `api/compileWire.ts` -- never redeclared a
 // second time here.
 import type {
+  AttachmentDeleteResponse,
+  AttachmentUploadResponse,
+  ClarifyRequest,
+  ClarifyResponse,
   CompileSnapshot,
   DeleteGraphResponse,
   ExportResponse,
@@ -93,14 +97,24 @@ async function parseErrorDetail(response: Response): Promise<unknown> {
   }
 }
 
+/** A body a caller may pass to `request`: a JSON string (the common case), or a
+ * `FormData` for the one multipart endpoint. A `FormData` body must NOT get a
+ * `Content-Type` header -- the browser sets it, boundary and all, and overriding
+ * it makes the server unable to parse the parts. */
+type RequestBody = string | FormData;
+
+function isJsonBody(body: RequestBody | null | undefined): body is string {
+  return typeof body === 'string';
+}
+
 async function request<T>(
   path: string,
-  init?: RequestInit,
+  init?: Omit<RequestInit, 'body'> & { body?: RequestBody | null },
 ): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(isJsonBody(init?.body) ? { 'Content-Type': 'application/json' } : {}),
       ...init?.headers,
     },
   });
@@ -295,6 +309,45 @@ function generateGraph(body: GenerateGraphRequest): Promise<GenerateGraphRespons
     method: 'POST',
     body: JSON.stringify(body),
   });
+}
+
+/** The analysis pass that decides whether questions are needed before drafting
+ * (`POST /api/graphs/generate/clarify`). One model call, no drafting. */
+function clarifyGraph(
+  body: ClarifyRequest,
+  opts?: { signal?: AbortSignal },
+): Promise<ClarifyResponse> {
+  return request<ClarifyResponse>('/graphs/generate/clarify', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    signal: opts?.signal,
+  });
+}
+
+/** Upload one supplementary file (`POST /api/graphs/attachments`, multipart).
+ * One file per request: the panel shows a per-file error and a per-file chip, and
+ * the server enforces the per-file cap while reading the body. */
+function uploadAttachment(
+  file: File,
+  opts?: { signal?: AbortSignal },
+): Promise<AttachmentUploadResponse> {
+  const form = new FormData();
+  form.append('file', file);
+  return request<AttachmentUploadResponse>('/graphs/attachments', {
+    method: 'POST',
+    body: form,
+    signal: opts?.signal,
+  });
+}
+
+/** Discard an uploaded attachment (`DELETE /api/graphs/attachments/:id`). Used
+ * when a chip is removed and when the panel unmounts mid-upload, so an orphan
+ * cannot sit in the workspace for its whole TTL. */
+function deleteAttachment(attachmentId: string): Promise<AttachmentDeleteResponse> {
+  return request<AttachmentDeleteResponse>(
+    `/graphs/attachments/${encodeURIComponent(attachmentId)}`,
+    { method: 'DELETE' },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +654,9 @@ export const api = {
   cancelCompile,
   subscribeCompileEvents,
   generateGraph,
+  clarifyGraph,
+  uploadAttachment,
+  deleteAttachment,
   startRun,
   listRuns,
   getRun,

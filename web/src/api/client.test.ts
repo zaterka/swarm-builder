@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { subscribeCompileEvents } from './client';
+import { api, subscribeCompileEvents } from './client';
 import type { CompileSseEvent } from './compileWire';
 
 // SSE frame-parsing tests against sse-starlette 3.4.11's REAL wire
@@ -148,5 +148,103 @@ describe('subscribeCompileEvents SSE frame parsing', () => {
 
     // Only the one connection attempt -- no reconnect after a clean done.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Attachments and the clarify pass (PLAN-ATTACHMENTS-CLARIFY.md)
+// ---------------------------------------------------------------------------
+
+function jsonOk(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+describe('uploadAttachment', () => {
+  it('posts multipart form data without a JSON content type', async () => {
+    const fetchMock = vi.fn(async () => jsonOk({ attachment: { id: 'a'.repeat(32) }, warnings: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const file = new File(['Order ID\n1\n'], 'orders.csv', { type: 'text/csv' });
+
+    await api.uploadAttachment(file);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/graphs/attachments');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeInstanceOf(FormData);
+    // The browser must set the multipart boundary itself; a JSON content type
+    // here makes the server unable to parse the parts.
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    expect(headers['Content-Type']).toBeUndefined();
+    expect((init.body as FormData).get('file')).toBe(file);
+  });
+
+  it('passes the abort signal through so a slow upload can be cancelled', async () => {
+    const fetchMock = vi.fn(async () => jsonOk({ attachment: {}, warnings: [] }));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    await api.uploadAttachment(new File(['x'], 'a.csv'), { signal: controller.signal });
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(init.signal).toBe(controller.signal);
+  });
+
+  it('surfaces the structured {code, message, problems} detail on a refusal', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            detail: {
+              code: 'image_input_unsupported',
+              message: 'no vision',
+              problems: ['no vision'],
+            },
+          }),
+          { status: 422, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+
+    await expect(api.uploadAttachment(new File(['x'], 'a.png'))).rejects.toMatchObject({
+      status: 422,
+      detail: { code: 'image_input_unsupported' },
+    });
+  });
+});
+
+describe('deleteAttachment', () => {
+  it('deletes by encoded id', async () => {
+    const fetchMock = vi.fn(async () => jsonOk({ attachmentId: 'x', deleted: true }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.deleteAttachment('abc/def');
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/graphs/attachments/abc%2Fdef');
+    expect(init.method).toBe('DELETE');
+  });
+});
+
+describe('clarifyGraph', () => {
+  it('posts the description with attachment ids and no model override', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonOk({ needsClarification: false, questions: [], assumptions: [] }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.clarifyGraph({ description: 'Handle it.', attachmentIds: ['a'.repeat(32)] });
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/graphs/generate/clarify');
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+    expect(body.description).toBe('Handle it.');
+    expect(body.attachmentIds).toEqual(['a'.repeat(32)]);
+    // The analysis pass uses the same resolved route as the draft, so there is
+    // deliberately no per-request override to send.
+    expect(body).not.toHaveProperty('modelOverride');
   });
 });

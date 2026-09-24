@@ -34,7 +34,6 @@ are testable with no credentials -- the mirror of ``SWARM_FAKE_FILL``.
 
 from __future__ import annotations
 
-import os
 import re
 from collections import defaultdict, deque
 from collections.abc import Sequence
@@ -44,10 +43,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
-from pydantic_ai import Agent, PromptedOutput, UsageLimits
+from pydantic_ai import Agent, BinaryContent, ModelSettings, PromptedOutput, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models import Model
 
+from swarm_builder import runtime
+from swarm_builder.attachments.context import render_attachments_context
+from swarm_builder.attachments.models import LoadedAttachment
+from swarm_builder.compile.clarify import ClarifyAnswerIn
 from swarm_builder.compile.review import Finding, review
 from swarm_builder.models import (
     AgentSpec,
@@ -86,9 +89,11 @@ REQUEST_LIMIT = 12
 #: ``Agent(retries=...)``: output-schema validation retries per request.
 AGENT_RETRIES = 3
 
-#: Env var and value that select :func:`fake_draft` instead of a model.
-FAKE_GENERATE_ENV_VAR = "SWARM_FAKE_GENERATE"
-FAKE_GENERATE_ENABLED_VALUE = "1"
+#: Env var and value that select :func:`fake_draft` instead of a model. The
+#: constants themselves live in :mod:`swarm_builder.runtime` (shared with the
+#: clarify pass); these aliases keep every existing import working.
+FAKE_GENERATE_ENV_VAR = runtime.FAKE_DRAFT_ENV_VAR
+FAKE_GENERATE_ENABLED_VALUE = runtime.FAKE_DRAFT_ENABLED_VALUE
 
 #: Layout grid: rank (BFS depth from the entry) along x, order within a rank
 #: along y. Matches the canvas node card size with room for edge labels.
@@ -566,7 +571,24 @@ Rules the reviewer enforces:
   fields some earlier node writes. Declare every field in `stateFields`.
 - Every node has a one-sentence `intent`.
 
+Three things you may also be given, and how to treat them:
+
+- Supplementary file excerpts, under "The user attached these supplementary
+  files". These are CONTEXT, not a step list: use their field names,
+  terminology, routing rules, thresholds and sample data, but never create a node
+  per row, per sheet or per slide.
+- Answers to questions you asked, under "The user answered your clarifying
+  questions". These are authoritative: build the workflow they describe even when
+  the original description was vaguer.
+- Images attached by the user, sent to you as image content. Read them the same
+  way: as evidence about the business workflow (a whiteboard sketch, a screenshot
+  of a screen, a process diagram), not as a specification of the graph.
+
 Return only the GraphDraft.
+"""
+
+_ANSWERS_HEADER = """\
+The user answered your clarifying questions. Treat these answers as authoritative:
 """
 
 _REPAIR_PROMPT = """\
@@ -578,7 +600,9 @@ the workflow the description asked for.
 """
 
 
-def build_generate_agent(model: Model | str) -> Agent[None, GraphDraft]:
+def build_generate_agent(
+    model: Model | str, *, max_output_tokens: int | None = None
+) -> Agent[None, GraphDraft]:
     """The structured-output agent, built per call (never at import).
 
     ``PromptedOutput`` rather than pydantic-ai's default tool-based output:
@@ -587,6 +611,13 @@ def build_generate_agent(model: Model | str) -> Agent[None, GraphDraft]:
     does not support this tool_choice``). Prompted output puts the JSON
     schema in the instructions and validates the reply, which every chat
     model supports; ``retries`` covers a reply that fails validation.
+
+    Args:
+        model: What the agent runs on.
+        max_output_tokens: An explicit output budget, or ``None`` to keep the
+            provider's default. See
+            :func:`swarm_builder.known_models.default_max_output_tokens` for why
+            one is needed at all.
     """
     return Agent(
         model,
@@ -594,11 +625,85 @@ def build_generate_agent(model: Model | str) -> Agent[None, GraphDraft]:
         instructions=GENERATE_INSTRUCTIONS,
         retries=AGENT_RETRIES,
         defer_model_check=True,
+        model_settings=ModelSettings(max_tokens=max_output_tokens)
+        if max_output_tokens
+        else None,
     )
 
 
 def _format_problems(problems: Sequence[str]) -> str:
     return "\n".join(f"- {problem}" for problem in problems)
+
+
+def render_answers(answers: Sequence[ClarifyAnswerIn]) -> str:
+    """Render question answers as the authoritative prompt block.
+
+    The trailing newline matters: the block is one element of a prompt-part list,
+    and a bare bullet list would otherwise run into the text that follows.
+
+    Args:
+        answers: Answers the panel collected, in the order they were shown.
+
+    Returns:
+        The block, or '' when there is nothing to render.
+    """
+    lines: list[str] = []
+    for item in answers:
+        answer = item.answer.strip()
+        if not answer:
+            continue
+        question = (item.question or "").strip()
+        if question:
+            lines.append(f"- Q: {question}\n  A: {answer}")
+        else:
+            lines.append(f"- {answer}")
+    if not lines:
+        return ""
+    return _ANSWERS_HEADER + "\n".join(lines) + "\n"
+
+
+def build_prompt_parts(
+    description: str,
+    attachments: Sequence[LoadedAttachment] = (),
+    answers: Sequence[ClarifyAnswerIn] = (),
+) -> str | list[str | BinaryContent]:
+    """Assemble the drafter's first user message.
+
+    Three rules:
+
+    * With nothing attached and nothing answered, this returns the description
+      alone -- byte-identical to the prompt this endpoint sent before the feature
+      existed. That is a test-asserted invariant, because it is what makes the
+      change safe for every existing user of the endpoint.
+    * Text order is fixed: description, then answers (authoritative), then file
+      context (evidence).
+    * Images travel as :class:`~pydantic_ai.BinaryContent` parts after the text,
+      so the model sees the instruction and the context before the pictures.
+
+    Args:
+        description: The user's prose.
+        attachments: Loaded attachments named by the request.
+        answers: Answers to the clarifying questions.
+
+    Returns:
+        A plain string, or the list of prompt parts when there is more to say.
+    """
+    answers_block = render_answers(answers)
+    context_block = render_attachments_context(attachments)
+    image_parts = [
+        BinaryContent(data=item.binary, media_type=item.record.media_type)
+        for item in attachments
+        if item.record.kind == "image" and item.binary is not None
+    ]
+    if not answers_block and not context_block and not image_parts:
+        return description
+    parts: list[str | BinaryContent] = [description]
+    if answers_block:
+        parts.append(answers_block)
+    if context_block:
+        parts.append(context_block)
+    parts.extend(image_parts)
+    return parts
 
 
 def _review_problems(findings: Sequence[Finding]) -> list[str]:
@@ -611,17 +716,15 @@ def _review_problems(findings: Sequence[Finding]) -> list[str]:
 def fake_generate_enabled() -> bool:
     """Whether the deterministic stub draft is used (read per call, never cached).
 
-    True when ``SWARM_FAKE_GENERATE=1`` *or* the application's own dry-run
-    switch is on (:func:`swarm_builder.runtime.dry_run_active`). Generation is
-    a single request rather than a long job, so there is no mid-flight state
-    to freeze: the answer is read once per request, which is exactly the
-    lifetime of the decision it feeds.
+    True when ``SWARM_FAKE_GENERATE=1`` *or* the application's own dry-run switch
+    is on. The decision itself now lives in
+    :func:`swarm_builder.runtime.fake_draft_enabled`, because the clarify pass
+    needs the same answer and this module is imported by it -- one switch, one
+    place. Generation is a single request rather than a long job, so there is no
+    mid-flight state to freeze: the answer is read once per request, which is
+    exactly the lifetime of the decision it feeds.
     """
-    from swarm_builder import runtime
-
-    return runtime.dry_run_active() or (
-        os.environ.get(FAKE_GENERATE_ENV_VAR) == FAKE_GENERATE_ENABLED_VALUE
-    )
+    return runtime.fake_draft_enabled()
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+|;\s+|\bthen\b", re.IGNORECASE)
@@ -667,7 +770,10 @@ async def generate_graph(
     *,
     model: Model | str | None,
     graph_id: str,
+    attachments: Sequence[LoadedAttachment] = (),
+    answers: Sequence[ClarifyAnswerIn] = (),
     max_repairs: int = MAX_REPAIRS,
+    max_output_tokens: int | None = None,
 ) -> GenerateResult:
     """Describe -> draft -> materialize -> review, repairing up to ``max_repairs`` times.
 
@@ -676,7 +782,14 @@ async def generate_graph(
         model: What ``Agent(...)`` runs on (a ``LiveModel.model``), or
             ``None`` -- allowed only with ``SWARM_FAKE_GENERATE=1``.
         graph_id: The id the document will be saved under.
+        attachments: Supplementary files the user attached. Their text becomes a
+            context block and their bytes become image content; with none, the
+            prompt is exactly ``description``.
+        answers: Answers to the clarify pass' questions, rendered as
+            authoritative in the prompt.
         max_repairs: Feedback rounds after the first draft.
+        max_output_tokens: An explicit output budget for each model call, or
+            ``None`` for the provider's default.
 
     Returns:
         The review-clean graph, its warnings, and how many drafts it took.
@@ -696,9 +809,13 @@ async def generate_graph(
     if model is None:
         raise ValueError("generate_graph needs a model unless SWARM_FAKE_GENERATE=1 is set")
 
-    agent = build_generate_agent(model)
+    agent = build_generate_agent(model, max_output_tokens=max_output_tokens)
     limits = UsageLimits(request_limit=REQUEST_LIMIT)
-    prompt = description
+    # The parts (and any images in them) travel in this first user message, so
+    # every repair round carries them through ``message_history`` for free.
+    prompt: str | list[str | BinaryContent] = build_prompt_parts(
+        description, attachments, answers
+    )
     history = None
     problems: list[str] = []
     attempts = 0
@@ -728,6 +845,7 @@ __all__ = [
     "FAKE_GENERATE_ENV_VAR",
     "MAX_REPAIRS",
     "REQUEST_LIMIT",
+    "ClarifyAnswerIn",
     "DraftEdge",
     "DraftError",
     "DraftNode",
@@ -736,9 +854,11 @@ __all__ = [
     "GenerateResult",
     "GraphDraft",
     "build_generate_agent",
+    "build_prompt_parts",
     "fake_draft",
     "fake_generate_enabled",
     "generate_graph",
     "layout_positions",
     "materialize",
+    "render_answers",
 ]

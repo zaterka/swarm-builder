@@ -77,4 +77,49 @@ def is_known_model_name(candidate: str) -> bool:
     return candidate in known_model_names()
 
 
-__all__ = ["is_known_model_name", "known_model_names"]
+#: Output-token budget an in-process agent call asks for on a model that thinks
+#: before it answers.
+#:
+#: Measured, not guessed: drafting from a vision prompt through
+#: ``anthropic:claude-sonnet-5`` used 5135 output tokens for one GraphDraft, while
+#: pydantic-ai's Anthropic default is ``max_tokens=4096``. A thinking model spends
+#: that budget on thinking first, so it sometimes returns ``finish_reason=length``
+#: with no text at all -- and pydantic-ai deliberately does *not* retry that case,
+#: failing the whole request with "Model token limit (provider default) exceeded
+#: before any response was generated". Text-only drafts squeaked under the limit;
+#: attaching a file pushed the input (and the thinking) past it.
+THINKING_MODEL_MAX_OUTPUT_TOKENS = 16384
+
+
+def default_max_output_tokens(model: str) -> int | None:
+    """The ``max_tokens`` an in-process agent call should ask for, or ``None``.
+
+    ``None`` means "leave the provider's own default alone": only the model
+    families where a too-small default is a *known* failure get an explicit
+    budget, so every other route keeps behaving exactly as it did.
+
+    The check is on the model id's last dot-separated segment, which covers both
+    a bare id (``claude-sonnet-5``) and a Bedrock one
+    (``us.anthropic.claude-sonnet-4-6``) without a second normalizer.
+
+    Args:
+        model: The resolved model id, possibly with a ``provider:`` prefix.
+
+    Returns:
+        The budget, or ``None`` to use the provider default.
+    """
+    text = (model or "").strip().lower()
+    if ":" in text:
+        text = text.split(":", 1)[1].strip()
+    segment = text.rsplit(".", 1)[-1]
+    if segment.startswith("claude-"):
+        return THINKING_MODEL_MAX_OUTPUT_TOKENS
+    return None
+
+
+__all__ = [
+    "THINKING_MODEL_MAX_OUTPUT_TOKENS",
+    "default_max_output_tokens",
+    "is_known_model_name",
+    "known_model_names",
+]

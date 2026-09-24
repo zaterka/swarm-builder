@@ -85,7 +85,7 @@ def test_generate_maps_pydantic_ai_user_error_to_503(
         async def run(self, *args: object, **kwargs: object) -> None:
             raise UserError("Set the `DEEPSEEK_API_KEY` environment variable")
 
-    monkeypatch.setattr(generate_module, "build_generate_agent", lambda model: _Boom())
+    monkeypatch.setattr(generate_module, "build_generate_agent", lambda model, **_: _Boom())
     response = TestClient(create_app()).post("/api/graphs/generate", json={"description": "x"})
     assert response.status_code == 503
     assert "model configuration error" in response.json()["detail"]
@@ -105,7 +105,7 @@ def test_generate_maps_model_http_error_to_502(
                 body={"message": "Thinking mode does not support this tool_choice"},
             )
 
-    monkeypatch.setattr(generate_module, "build_generate_agent", lambda model: _Refused())
+    monkeypatch.setattr(generate_module, "build_generate_agent", lambda model, **_: _Refused())
     response = TestClient(create_app()).post("/api/graphs/generate", json={"description": "x"})
     assert response.status_code == 502
     assert "tool_choice" in response.json()["detail"]

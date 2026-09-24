@@ -81,6 +81,30 @@ export type RunListResponse = components['schemas']['RunListResponse'];
 // Describe -> generate (`routes/generate.py`).
 export type GenerateGraphRequest = components['schemas']['GenerateGraphRequest'];
 export type GenerateGraphResponse = components['schemas']['GenerateGraphResponse'];
+export type ClarifyRequest = components['schemas']['ClarifyRequest'];
+export type ClarifyResponse = components['schemas']['ClarifyResponse'];
+export type ClarifyQuestionOut = components['schemas']['ClarifyQuestionOut'];
+export type ClarifyOptionOut = components['schemas']['ClarifyOptionOut'];
+export type ClarifyAnswer = components['schemas']['ClarifyAnswerInRaw'];
+export type AttachmentSummaryOut = components['schemas']['AttachmentSummaryOut'];
+
+// Supplementary files (`routes/attachments.py`). The server owns the caps and
+// the supported formats; the panel renders what it is told rather than restating
+// those rules, so the two cannot drift.
+export type AttachmentOut = components['schemas']['AttachmentOut'];
+export type AttachmentUploadResponse = components['schemas']['AttachmentUploadResponse'];
+export type AttachmentDeleteResponse = components['schemas']['AttachmentDeleteResponse'];
+
+/** The structured detail the attachment, clarify and generate routes return:
+ * `{code, message, problems}`. `code` is what lets the panel tell "this
+ * attachment expired" from "this model cannot read images" without parsing prose.
+ * Hand-written rather than generated, because it is the *error* envelope shared
+ * by several routes, not one route's response schema. */
+export interface ProblemDetail {
+  code: string;
+  message: string;
+  problems: string[];
+}
 
 // In-app model settings (`routes/settings.py`). `SavedModelOut` deliberately
 // has no field for the API key itself: the server reports only whether one is

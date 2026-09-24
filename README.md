@@ -51,7 +51,7 @@ the repository is what you ship.
 | | |
 |---|---|
 | **Configure a model in the app** | Pick a provider, paste a key, test it — no file, no environment variable, no restart. Turn on dry run to work offline. |
-| **Describe → workflow** | Write a paragraph. The model drafts nodes and edges; deterministic code derives ids, decision branches, fan-out wiring, state fields and layout; the same reviewer that gates a compile checks the draft and feeds errors back. You land on an editable canvas. |
+| **Describe → workflow** | Write a paragraph — or attach the spreadsheets, decks, CSVs and screenshots the workflow runs on. If anything is ambiguous the app asks up to four questions with concrete options before drafting; deterministic code derives ids, decision branches, fan-out wiring, state fields and layout; the same reviewer that gates a compile checks the draft and feeds errors back. You land on an editable canvas. |
 | **Run on the canvas** | Execute the compiled project with your credentials and watch it node by node: live status on each node, per-node inputs and outputs, final state, run history. Edit and run again; a stale project recompiles first, in the same stream. |
 | **Compile to PydanticAI** | Five phases: review → scaffold → fill → boundary → validate. Nothing is written until review passes. The output is a project with `pyproject.toml`, pinned dependencies, and its own validation gate. |
 | **Export to LangGraph** | Four more phases convert the *validated* project into a LangGraph export: pure LangGraph orchestration, LangChain only for model calls, messages and tools. Verified the same way. |

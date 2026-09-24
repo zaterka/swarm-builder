@@ -542,6 +542,55 @@ Generation needs a configured model route (the same one a compile uses). With
 `SWARM_FAKE_GENERATE=1` the model is replaced by a deterministic
 sentence-per-step draft, which is how the endpoint and the panel are tested.
 
+**On Claude routes**, drafting and the analysis pass ask for a 16k output budget
+instead of the 4096 the provider SDK defaults to. A thinking model spends that
+budget on thinking before it writes anything, so at 4096 it intermittently
+returned an empty answer with `finish_reason=length` — which pydantic-ai refuses
+to retry, failing the request as "Model token limit (provider default) exceeded
+before any response was generated". A vision prompt plus a large structured draft
+measured at ~5.1k output tokens, which is why the smaller default was not enough.
+Every other route keeps its provider default.
+
+### Attach the documents you already have
+
+A description is often the smallest part of what you know. **Attach files**
+(or drop them on the panel) takes the material the workflow actually runs on:
+`.xlsx` workbooks, `.pptx` decks, `.csv`/`.tsv` tables, and images. Up to five
+files, 10 MB each.
+
+The server reads text files into a bounded, labelled context block (sheet names,
+cell values, slide text, speaker notes, formulas whose values were never
+computed), and hands that block to the model as **context, not as a step list** —
+so a 400-row export contributes its column names and thresholds rather than 400
+nodes. Images are sent as image content, which is why they need a model that can
+see: `deepseek-flash` can (and it is what this app resolves to by default),
+`deepseek-v4-flash`, `deepseek-reasoner` and the Groq/Mistral picks cannot, and
+attaching an image with one of those is refused up front with the fix named.
+Keep images to a few MB — a screenshot or a diagram, not a phone photo.
+
+Each chip shows what was read (character count, a truncation badge, and a folded
+"what we read" preview), and the panel states which provider the content is about
+to be sent to. Attachments live in `workspace/attachments/` for six hours and are
+never written into the graph document or the exported project; deleting a chip
+deletes the file.
+
+### Answer the questions, or skip them
+
+Before drafting, one cheap analysis pass decides whether your description is
+concrete enough. If it is, drafting starts immediately and the panel lists what
+the draft will assume. If it is not, you get up to four questions — each with
+concrete options, one of them recommended, and an "Other…" box — because a
+question like *"where do refund decisions come from?"* changes the shape of the
+graph, and guessing it wrong produces a graph that compiles but is not your
+workflow.
+
+**Generate anyway** drafts with your original description, **Back to
+description** returns to the editor with everything you typed and attached still
+there. The analysis runs at most once per description-and-files combination, so
+clicking back and forth does not spend a second call. When the analysis call
+itself fails upstream, the panel says so and drafts anyway rather than blocking
+you.
+
 ## Export to LangGraph
 
 The compile panel has a **Target** picker. *PydanticAI + LangGraph export*

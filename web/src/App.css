@@ -1137,6 +1137,187 @@ span.sb-run-failed {
 }
 
 
+/* ---------- Attachments and clarifying questions ---------- */
+
+/* The drop target is the whole panel: a user dragging a workbook over a form
+   expects the form to accept it, not a 200px zone to aim at. */
+.sb-generate-dragging {
+  outline: 2px dashed var(--sb-accent-border);
+  outline-offset: 4px;
+  background: var(--sb-accent-soft);
+}
+.sb-attach-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+/* The real input stays in the DOM for its native picker dialog and its
+   accessibility, but is never seen: the styled button drives it. */
+.sb-attach-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+.sb-attach-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sb-attach-chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px 4px 10px;
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-r-sm);
+  background: var(--sb-surface-2);
+  font-size: 12.5px;
+}
+.sb-attach-chip-error {
+  border-color: var(--sb-danger-border);
+  background: var(--sb-danger-soft);
+  color: var(--sb-danger);
+}
+.sb-attach-chip-reading {
+  color: var(--sb-text-muted);
+  font-style: italic;
+}
+.sb-attach-chip-name {
+  font-weight: 500;
+  max-width: 40ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-attach-chip-meta {
+  color: var(--sb-text-subtle);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sb-attach-chip-truncated {
+  padding: 0 5px;
+  border: 1px solid var(--sb-warn);
+  border-radius: var(--sb-r-sm);
+  color: var(--sb-warn);
+  background: var(--sb-warn-soft);
+  font-size: 11px;
+}
+.sb-attach-chip-warning {
+  flex-basis: 100%;
+  color: var(--sb-warn);
+}
+/* "What we read": the user's only way to see what context is about to reach
+   their provider, so it is available but folded away by default. */
+.sb-attach-chip-preview {
+  flex-basis: 100%;
+  color: var(--sb-text-muted);
+}
+.sb-attach-chip-preview summary {
+  cursor: pointer;
+  font-size: 11.5px;
+}
+.sb-attach-chip-preview pre {
+  margin: 4px 0 2px;
+  padding: 6px 8px;
+  max-height: 160px;
+  overflow: auto;
+  background: var(--sb-surface);
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-r-sm);
+  font-size: 11.5px;
+  white-space: pre-wrap;
+}
+.sb-attach-privacy {
+  margin: 0;
+  color: var(--sb-text-subtle);
+  font-size: 11.5px;
+}
+.sb-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--sb-accent-border);
+  border-radius: var(--sb-r-lg);
+  background: var(--sb-accent-soft);
+  padding: 10px 12px;
+}
+.sb-questions-understanding {
+  margin: 0;
+  font-style: italic;
+  color: var(--sb-text-muted);
+  font-size: 12.5px;
+}
+.sb-questions-assumptions {
+  font-size: 12.5px;
+}
+.sb-questions-assumptions ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--sb-text-muted);
+}
+.sb-question {
+  border: 0;
+  margin: 0;
+  padding: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sb-question legend {
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 0;
+}
+.sb-question-why {
+  margin: 0;
+  color: var(--sb-text-subtle);
+  font-size: 11.5px;
+}
+.sb-question-option {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.sb-question-option-note {
+  color: var(--sb-text-subtle);
+  font-style: italic;
+}
+.sb-question-free {
+  font: inherit;
+  font-size: 12.5px;
+  padding: 3px 6px;
+  border: 1px solid var(--sb-border-strong);
+  border-radius: var(--sb-r-sm);
+  max-width: 40ch;
+}
+.sb-generated-notice-inline {
+  padding: 6px 10px;
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-r-sm);
+  background: var(--sb-success-soft);
+  font-size: 12.5px;
+}
+.sb-generated-notice-inline ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--sb-warn);
+}
+
+
 /* ---------- Compile target picker ---------- */
 
 .sb-target-picker {

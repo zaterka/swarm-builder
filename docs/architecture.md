@@ -754,6 +754,55 @@ at most two repair rounds — the same propose/check/report loop the fill agent
 runs with `parse_check`. `SWARM_FAKE_GENERATE=1` is the model-free twin of
 `SWARM_FAKE_FILL=1`.
 
+**Attachments and clarifying questions (`attachments/`, `vision.py`,
+`compile/clarify.py`).** Two extensions of the same flow, added by
+`PLAN-ATTACHMENTS-CLARIFY.md`, both keeping the graph document untouched.
+
+An attachment is *evidence for one description*, not part of the document. The
+route stores it under `workspace/attachments/<id>/` (uuid directory, one
+`os.rename` to publish, 6 h TTL, pruned on every upload and use) and returns an
+opaque id; a later request names ids, and the store enforces the count and
+total-size caps from record metadata before reading anything. Reading is where
+the danger is, so it is bounded on every axis: the extension picks the reader,
+the container's declared uncompressed size is checked *before* `openpyxl` or
+`python-pptx` is imported (a 10 MiB workbook can otherwise inflate to
+gigabytes), parsing runs in a worker thread under a per-file timeout inside a
+process-wide semaphore, and every structure cap (sheets, slides, rows, columns,
+cell length, characters) is reported in `notes` rather than applied silently.
+Parser exception text never escapes: it is mapped to a fixed, app-authored
+sentence, so no error body, log line, or stored note can carry a workspace path
+or a cell of a confidential spreadsheet. `render_attachments_context` turns the
+extracts into one labelled block bounded by 60k characters, framed explicitly as
+context rather than a step list.
+
+Images are the one kind whose content is not text, so they need a model that can
+see. `vision.py` holds the single table of ids documented as image-capable
+(DeepSeek's `deepseek-flash`, which is what this app resolves to, plus the
+Claude/GPT/Gemini/Pixtral families), checked at upload **and** again at
+generate/clarify because the model can change in between. An unrecognised id is
+refused with a message naming both fixes — a false negative costs one message,
+where sending bytes a text-only model rejects costs a failed generation and a
+raw provider error. The gate never becomes a credential bypass: a vision-capable
+model without a key still fails at the existing credential check.
+
+The clarify pass is one model call (`compile/clarify.py`) before drafting,
+mirroring the generator's structure (`PromptedOutput`, no repair loop, the same
+request budget). Its output schema is deliberately **permissive** — no
+`min_length` on options, no model-chosen ids — because `PromptedOutput` validates
+before any of our code runs, so a constraint there would turn a sloppy answer
+into a `502` instead of fewer questions. All bounding happens in
+`sanitize_analysis`: truncate to four, drop unusable questions, coerce an
+out-of-list recommendation, assign `q1…`, and force `needsClarification` to
+agree with the question list. Answers then travel into the drafter as a separate,
+explicitly authoritative prompt part; the attachment context and image parts
+follow it. With neither files nor answers, `build_prompt_parts` returns the bare
+description — byte for byte the prompt this endpoint sent before the feature
+existed, which is asserted by test.
+
+The fake-switch constant moved to `runtime.py` (`fake_draft_enabled`) so the
+analysis pass and the drafter cannot disagree, and the dependency runs one way:
+`compile/generate.py` imports `ClarifyAnswerIn` from `compile/clarify.py`.
+
 **LangGraph target (`compile/langgraph/`).** A ``target="langgraph"``
 compile runs the five standard phases and then four more on the *validated*
 pydantic-graph project. The shape mirrors the pipeline it extends:

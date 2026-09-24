@@ -467,6 +467,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/graphs/generate/clarify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clarify Graph Route
+         * @description Decide whether ``body.description`` needs questions before drafting.
+         *
+         *     Raises:
+         *         HTTPException: 422 when an attachment id is unknown or expired; 502/503
+         *             for model setup and upstream failures, mirroring ``/generate``.
+         */
+        post: operations["clarify_graph_route_api_graphs_generate_clarify_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/graphs/generate": {
         parameters: {
             query?: never;
@@ -482,12 +506,61 @@ export interface paths {
          *
          *     Raises:
          *         HTTPException: 422 when every attempt failed (the detail carries the
-         *             last review findings as ``problems``); 503 when the resolved
+         *             last review findings as ``problems``) or an attachment expired; 413
+         *             when the attachments exceed the size cap; 503 when the resolved
          *             route is unmappable, no model is configured, or the generator
          *             cannot be imported; 500 when the graph cannot be saved.
          */
         post: operations["generate_graph_route_api_graphs_generate_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graphs/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Attachment Route
+         * @description Store one uploaded file and return its id and a preview of what was read.
+         *
+         *     Raises:
+         *         HTTPException: 413 for an oversized body, 415 for an unsupported type,
+         *             422 for an unreadable file or an image under a non-vision model, 503
+         *             when the parsers are missing or no model is configured (images only).
+         */
+        post: operations["upload_attachment_route_api_graphs_attachments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graphs/attachments/{attachmentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Attachment Route
+         * @description Discard one attachment (idempotent for the caller, 404 when unknown).
+         *
+         *     Raises:
+         *         HTTPException: 404 when the id is malformed, unknown, or already gone.
+         */
+        delete: operations["delete_attachment_route_api_graphs_attachments__attachmentId__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -519,6 +592,77 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** AttachmentDeleteResponse */
+        AttachmentDeleteResponse: {
+            /** Attachmentid */
+            attachmentId: string;
+            /** Deleted */
+            deleted: boolean;
+        };
+        /**
+         * AttachmentOut
+         * @description One attachment, as the panel needs it.
+         */
+        AttachmentOut: {
+            /** Id */
+            id: string;
+            /** Filename */
+            filename: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "csv" | "xlsx" | "pptx" | "image";
+            /** Mediatype */
+            mediaType: string;
+            /** Bytes */
+            bytes: number;
+            /** Chars */
+            chars: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Notes */
+            notes: string[];
+            /** Preview */
+            preview: string;
+            /**
+             * Expiresat
+             * Format: date-time
+             */
+            expiresAt: string;
+        };
+        /**
+         * AttachmentSummaryOut
+         * @description One attachment as it was used by a generation.
+         */
+        AttachmentSummaryOut: {
+            /** Id */
+            id: string;
+            /** Filename */
+            filename: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "csv" | "xlsx" | "pptx" | "image";
+            /** Chars */
+            chars: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Notes */
+            notes: string[];
+        };
+        /** AttachmentUploadResponse */
+        AttachmentUploadResponse: {
+            attachment: components["schemas"]["AttachmentOut"];
+            /** Warnings */
+            warnings: string[];
+        };
+        /** Body_upload_attachment_route_api_graphs_attachments_post */
+        Body_upload_attachment_route_api_graphs_attachments_post: {
+            /** File */
+            file: string;
+        };
         /**
          * BranchEdge
          * @description One arm of a decision's dispatch, drawn on the canvas from the
@@ -539,6 +683,65 @@ export interface components {
             target: string;
             /** Match */
             match: string;
+        };
+        /**
+         * ClarifyAnswerInRaw
+         * @description One answer from the panel.
+         */
+        ClarifyAnswerInRaw: {
+            /** Questionid */
+            questionId: string;
+            /** Question */
+            question?: string | null;
+            /** Answer */
+            answer: string;
+        };
+        /** ClarifyOptionOut */
+        ClarifyOptionOut: {
+            /** Label */
+            label: string;
+            /** Description */
+            description?: string | null;
+        };
+        /** ClarifyQuestionOut */
+        ClarifyQuestionOut: {
+            /** Id */
+            id: string;
+            /** Question */
+            question: string;
+            /** Why */
+            why: string;
+            /** Options */
+            options: components["schemas"]["ClarifyOptionOut"][];
+            /** Recommended */
+            recommended: string;
+        };
+        /**
+         * ClarifyRequest
+         * @description Body of ``POST /api/graphs/generate/clarify``.
+         *
+         *     No ``modelOverride``: the analysis pass uses the same resolved route as the
+         *     draft, so model selection happens in exactly one place for this flow.
+         */
+        ClarifyRequest: {
+            /** Description */
+            description: string;
+            /** Attachmentids */
+            attachmentIds?: string[];
+        };
+        /** ClarifyResponse */
+        ClarifyResponse: {
+            /** Needsclarification */
+            needsClarification: boolean;
+            /** Questions */
+            questions: components["schemas"]["ClarifyQuestionOut"][];
+            /** Assumptions */
+            assumptions: string[];
+            /** Understanding */
+            understanding: string;
+            model: components["schemas"]["GenerateModelOut"];
+            /** Dryrun */
+            dryRun: boolean;
         };
         /**
          * CompileSnapshotResponse
@@ -726,6 +929,16 @@ export interface components {
              */
             graphId?: string | null;
             modelOverride?: components["schemas"]["ModelSelection"] | null;
+            /**
+             * Attachmentids
+             * @description Ids returned by POST /api/graphs/attachments.
+             */
+            attachmentIds?: string[];
+            /**
+             * Answers
+             * @description Answers to the clarify pass' questions; authoritative for the draft.
+             */
+            answers?: components["schemas"]["ClarifyAnswerInRaw"][];
         };
         /** GenerateGraphResponse */
         GenerateGraphResponse: {
@@ -737,6 +950,8 @@ export interface components {
             model: components["schemas"]["GenerateModelOut"];
             /** Dryrun */
             dryRun: boolean;
+            /** Attachments */
+            attachments?: components["schemas"]["AttachmentSummaryOut"][];
         };
         /** GenerateModelOut */
         GenerateModelOut: {
@@ -2128,6 +2343,51 @@ export interface operations {
             };
         };
     };
+    clarify_graph_route_api_graphs_generate_clarify_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClarifyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClarifyResponse"];
+                };
+            };
+            /** @description the description or an attachment is unusable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the model API refused or failed the request, or answered unusably */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no usable route or credential, or the generator is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     generate_graph_route_api_graphs_generate_post: {
         parameters: {
             query?: never;
@@ -2150,6 +2410,13 @@ export interface operations {
                     "application/json": components["schemas"]["GenerateGraphResponse"];
                 };
             };
+            /** @description the attachments exceed the per-request size cap */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description the model could not produce a review-clean graph */
             422: {
                 headers: {
@@ -2170,6 +2437,96 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    upload_attachment_route_api_graphs_attachments_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_attachment_route_api_graphs_attachments_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentUploadResponse"];
+                };
+            };
+            /** @description the file exceeds the per-file size cap */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the file type is not supported */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the file could not be read, or the model cannot read images */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the attachment readers are unavailable, or no model is configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_attachment_route_api_graphs_attachments__attachmentId__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attachmentId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentDeleteResponse"];
+                };
+            };
+            /** @description no such attachment */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

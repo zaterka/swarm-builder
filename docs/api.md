@@ -746,7 +746,8 @@ graph store before it is returned.
 | Status | When |
 |---|---|
 | `200` | Saved and returned. `warnings` are the reviewer's non-blocking findings. |
-| `422` | Empty/oversized description, or every attempt failed — the detail is `{message, problems, attempts}` with the last round's review findings. |
+| `413` | The named attachments exceed the count or total-size cap. |
+| `422` | Empty/oversized description, an unknown/expired attachment id, an image under a model that cannot read images, or every attempt failed — the last is `{code: "generation_failed", message, problems, attempts}` with the review findings. |
 | `503` | No model is configured (and dry run is off), an unmappable provider, or the generator could not be imported. The detail names the fix in this application's own terms. |
 
 `SWARM_FAKE_GENERATE=1` replaces the model with a deterministic
