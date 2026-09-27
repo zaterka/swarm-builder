@@ -207,6 +207,17 @@ tbody th { font-weight: 600; }
 .nodes tr td:first-child:is(td) { color: var(--ink-soft); }
 .after { margin-top: 18px; color: var(--ink-soft); }
 
+/* ---------------------------------------------------------------- deployment */
+.deployment-intro { color: var(--ink-soft); }
+.deployment-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(28px, 5vw, 64px);
+  align-items: start;
+  margin-top: 28px;
+}
+.deployment-grid figure { margin: 0; min-width: 0; }
+
 /* ---------------------------------------------------------------- compare */
 .compare-intro { color: var(--ink-soft); }
 .table-wrap { overflow-x: auto; margin-top: 12px; }
@@ -236,7 +247,7 @@ sup a { text-decoration: none; margin-left: 1px; }
 
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 900px) {
-  .hero, .how, .export, .describe-grid, .quickstart { grid-template-columns: minmax(0, 1fr); }
+  .hero, .how, .export, .describe-grid, .quickstart, .deployment-grid { grid-template-columns: minmax(0, 1fr); }
   .export .tree { order: 2; }
   .phases li { grid-template-columns: 2em 8em minmax(0, 1fr); }
 }
