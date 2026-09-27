@@ -42,6 +42,11 @@ const INPUT_PLACEHOLDERS = {
   str: 'Type the workflow input…',
   json: '{"key": "value"}',
   'list[str]': '["first", "second"]',
+  // A `list[json]` input only ever appears when the *entry* node declares it;
+  // the sample matches `PORT_TYPE_SAMPLE_INPUT` in `compile/scaffold.py`. The
+  // row exists so this map stays exhaustive over `PortType` (a new member
+  // would otherwise make `INPUT_PLACEHOLDERS[inputType]` an error).
+  'list[json]': '[{"key": "value"}]',
 } as const;
 
 const PROGRESS_LABELS = {

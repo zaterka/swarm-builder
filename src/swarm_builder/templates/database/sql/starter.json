@@ -1,0 +1,14 @@
+{
+  "label": "SQL (customers and orders)",
+  "description": "Read rows from a relational table: in mock mode from a stdlib SQLite database seeded from this node's own seed file, with no credentials and no server; in live mode from Postgres. The step binds the upstream node's value to the query's named placeholder.",
+  "spec": {
+    "query": "SELECT o.id, o.total FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = :input ORDER BY o.id",
+    "seed_sql": "-- Example data for the mock database: three customers and three of their orders.\n-- Both this seed and the query above are examples; replace them via the Inspector.\n-- The seed runs once, before the read-only guard is armed, so it may contain DDL.\nCREATE TABLE customers (\n    id INTEGER PRIMARY KEY,\n    name TEXT NOT NULL,\n    city TEXT NOT NULL\n);\n\nCREATE TABLE orders (\n    id INTEGER PRIMARY KEY,\n    customer_id INTEGER NOT NULL REFERENCES customers(id),\n    total REAL NOT NULL\n);\n\nINSERT INTO customers (id, name, city) VALUES\n    (1, 'Acme Corp', 'Berlin'),\n    (2, 'Globex', 'Lisbon'),\n    (3, 'Initech', 'Austin');\n\nINSERT INTO orders (id, customer_id, total) VALUES\n    (1, 1, 120.50),\n    (2, 1, 80.00),\n    (3, 2, 42.75);\n",
+    "write": false,
+    "note": "The customers/orders example, read-only. Replace via the Inspector."
+  },
+  "io": {
+    "input_type": "str",
+    "output_type": "list[json]"
+  }
+}

@@ -554,26 +554,22 @@ async def test_review_warnings_are_emitted_but_do_not_block(
     """A soft finding becomes a ``warning`` event and the compile still
     proceeds through every later phase."""
     monkeypatch.setenv("SWARM_FAKE_FILL", "1")
-    graph = POSITIVE_FIXTURES["websearch"]()
-    # `delegates_to` naming a child with no matching DelegateEdge is a
-    # soft finding (review.py's `delegate_without_edge` warning), not an
-    # error -- exactly the shape this test needs.
-    nodes = [
-        node.model_copy(
-            update={"agent": node.agent.model_copy(update={"delegates_to": ["not_a_child"]})}
-        )
-        if node.agent is not None
-        else node
-        for node in graph.nodes
-    ]
-    graph = graph.model_copy(update={"nodes": nodes})
-    assert any(finding.code == "delegate_without_edge" for finding in review(graph).warnings)
+    # A positive fixture that legitimately *warns*: two SQL nodes over different
+    # seeds get independent mock instances, so a write in one is invisible to the
+    # other. It is the natural subject here because the warning is inherent to the
+    # document rather than manufactured by mutating a fixture -- and mutating one is
+    # no longer safe, since a `delegates_to` name that resolves to nothing became a
+    # hard error (`delegate_target_not_agent`: delegation compiles to an import of
+    # `agents/<child>.py`).
+    graph = POSITIVE_FIXTURES["two_sql_nodes_different_seed"]()
+    expected_warning = "db_separate_mock_instances"
+    assert any(finding.code == expected_warning for finding in review(graph).warnings)
 
     job, _ = await _run(graph, tmp_path, monkeypatch, project_name="warnings")
 
     assert job.status == "succeeded"
     warnings = [payload for event_type, payload in _events(job) if event_type == "warning"]
-    assert any(warning["code"] == "delegate_without_edge" for warning in warnings)
+    assert any(warning["code"] == expected_warning for warning in warnings)
     for warning in warnings:
         assert isinstance(warning["nodeIds"], list)
 

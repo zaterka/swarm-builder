@@ -12,6 +12,7 @@ system as built*, and points at the code that owns each piece.
 - [The frontend's compile types are derived, not invented](#the-frontends-compile-types-are-derived-not-invented)
 - [The five compile phases](#the-five-compile-phases)
 - [Marker regions and the two-tier boundary check](#marker-regions-and-the-two-tier-boundary-check)
+- [The database-node subsystem](#the-database-node-subsystem)
 - [The deps_type seam](#the-deps_type-seam)
 - [Model-route inheritance and the two emission paths](#model-route-inheritance-and-the-two-emission-paths)
 - [Why the harness SDK tie-in was dropped](#why-the-harness-sdk-tie-in-was-dropped)
@@ -117,7 +118,7 @@ copy would drift:
 
 | Table | Purpose |
 |---|---|
-| `PORT_TYPE_ANNOTATIONS` / `PORT_TYPE_IMPORTS` | `str` → `str`; `list[str]` → `list[str]`; `json` → `dict[str, Any]` plus `from typing import Any`. A `PortType` is **never** interpolated verbatim into generated source: the label `json` is not a valid annotation, so emitting it produces a module that raises `NameError`. This is also the only place `Any` is permitted in this codebase. |
+| `PORT_TYPE_ANNOTATIONS` / `PORT_TYPE_IMPORTS` | `str` → `str`; `list[str]` → `list[str]`; `json` → `dict[str, Any]` plus `from typing import Any`; `list[json]` → `list[dict[str, Any]]` plus `from typing import Any`. A `PortType` is **never** interpolated verbatim into generated source: the label `json` is not a valid annotation, so emitting it produces a module that raises `NameError`. This is also the only place `Any` is permitted in this codebase. |
 | `REDUCER_FUNCTIONS` | Exactly four `ReducerId` literals → `reduce_list_append`, `reduce_list_extend`, `reduce_dict_update`, `reduce_sum`. `reduce_null` exists upstream but deliberately has no counterpart; joining without a reducer is expressed by omitting the join spec. |
 
 **A `json` port has to survive three separate hops, and each one asks the right
@@ -126,7 +127,7 @@ once, which is why the `json_ports` codegen fixture exists.
 
 ```mermaid
 flowchart LR
-  PT["PortType label<br/>str, list of str, or json"]
+  PT["PortType label<br/>str, list of str, json, or list of json"]
   ANN["PORT_TYPE_ANNOTATIONS<br/>json maps to dict of str to Any"]
   IMP["PORT_TYPE_IMPORTS<br/>json maps to from typing import Any"]
   SRC["Emitted source<br/>step signature, graph.py, agents"]
@@ -343,7 +344,7 @@ emitter bug, not just a tool bug.
 
 | Tier | Files | Check |
 |---|---|---|
-| Forbidden | Everything scaffolded that is *not* a marker-bearing `steps/*.py` or `agents/*.py` — including `graph.py`, `state.py`, `deps.py`, `pyproject.toml`, and all of `validate/` | Whole-file **SHA-256** against the baseline captured at the end of Phase 2. Any change fails the compile, naming the path. |
+| Forbidden | Everything scaffolded that is *not* a marker-bearing `steps/*.py` or `agents/*.py` — including `graph.py`, `state.py`, `deps.py`, `pyproject.toml`, the generated `repositories/` tree, and all of `validate/` | Whole-file **SHA-256** against the baseline captured at the end of Phase 2. Any change fails the compile, naming the path. |
 | Permitted | `steps/*.py`, `agents/*.py` | Parsed into regions: every marker must still exist, the body region must be non-empty, and the **concatenation of everything outside both regions** is hashed and compared. This is what stops an edit *around* the sandbox. |
 
 A third finding covers any file present that was not in the baseline:
@@ -460,6 +461,201 @@ one, while request and tool-call counts bound the runaway case exactly and
 are provider-independent. A separate wall-clock bound
 (`FILL_TIMEOUT_SECONDS = 600`, in `compile/jobs.py`) sits around the whole
 fill call, so a wedged model cannot hang a compile forever.
+
+## The database-node subsystem
+
+Three node kinds — `sql`, `nosql` and `vector` — read from a database as
+**real graph steps**: a step body emitted deterministically from the operation
+the Inspector declares, *and* a read-only repository tool an agent node can
+attach by naming the database node in its Tools list. What makes the three
+kinds worth a subsystem of their own is the property the rest of this document
+keeps returning to: the compiled project has to run end to end with no
+credentials, no server and no network. So every database node emits a complete
+repository layer — a `Protocol`, a working in-memory mock, a live adapter whose
+driver is an opt-in extra, a seed fixture, a factory and the `.env.example`
+keys — and *mock is the default*.
+
+Two boundaries shape everything below, so they are stated first:
+
+- **No model call produces a query, a seed or a repository file.** The default
+  operation and example data are static starters the server serves; the step
+  body is rendered from the document's declared fields. A Describe draft
+  chooses only *that* a database node exists and which kind it is, and its spec
+  and I/O are materialized from the same starter (`DraftNode` deliberately has
+  no operation fields), so the model never authors a statement.
+- **`repositories/` is outside the fill agent's permitted paths.** It is the
+  one part of a generated project where model-authored code could weaken the
+  read-only guard, so it is scaffolded-and-forbidden, not fillable.
+
+### The kind-dispatch surface
+
+A node kind is a closed literal, and adding one means touching every site that
+switches on it. Missing one produces a silently unwired node rather than an
+error, which is why the list is worth keeping complete:
+
+| Site | What it decides |
+|---|---|
+| `models.py`: `NodeKind`, `PortType`, `PORT_TYPE_ANNOTATIONS`, `PORT_TYPE_IMPORTS` | The closed literals and the annotation each port type contributes. `list[json]` is new because a result set is a *list of rows*: coercing it to `json` or to newline-joined `str` makes rows lossy the moment they cross an edge — including through a `join`, which is where a database read tends to be consumed. |
+| `models.py`: `SwarmNode` and the three spec models | `SqlSpec`, `NosqlSpec`, `VectorSpec` — one optional field per kind, exactly one non-null and matching `kind`, mirroring `AgentSpec`/`ProgrammaticSpec`. |
+| `review.py`: `_KIND_TO_SPEC_ATTR` | The "exactly one spec, and the right one" rule. |
+| `emit_graph.py`: `_STEP_KINDS` | That a database node gets a `builder.step(...)`. Deliberately **not** in `_BARE_VARIABLE_KINDS` (a database node does real work) and not in the `delegate_only_node_ids` carve-out. |
+| `scaffold.py`: the per-node emission tuple, `_render_step` | That a database node gets a `steps/<id>.py`, with a non-empty, deterministically rendered body. |
+| `scaffold.py`: `_render_stream_run` | Which steps the Run tracer wraps. A step omitted here is still emitted and still runs — it is simply **invisible on the canvas during a run**, which is the kind of gap this table exists to prevent. |
+| `langgraph/scaffold.py` | The same body for the LangGraph target, where the input arrives as the payload key and the result is written back into state. |
+| `fake_fill.py` `FILLABLE_NODE_KINDS`, `boundary.py` `DEFAULT_PERMITTED_DIRS`, the LangGraph conversion-target filters | **Unchanged.** No database node is model-fillable or a conversion target. |
+| `web/src/api/schema.ts`, `Palette.tsx`, `Canvas.tsx`, `graphStore.ts`, `theme.css`, `App.css` | The UI kind surface: the node kinds, the port types, the three palette entries, the node component and the per-kind colors. |
+
+### The starter catalog, and why it is separate from the template registry
+
+`src/swarm_builder/templates/database/` is a **second** catalog, keyed by node
+kind, not by agent behavior:
+
+```
+templates/database/
+  __init__.py                  DatabaseKindEntry + DATABASE_CATALOG + get_database_entry
+  sql/starter.json             label, description, default spec, port pair
+  nosql/starter.json
+  vector/starter.json
+  <kind>/repository.py.tmpl    Protocol + mock + live adapter, $package-parameterised
+  portshape.py.tmpl            row-to-port coercion, the SQL ":"-placeholder rewrite
+  embedding.py.tmpl            Embedder protocol + deterministic HashEmbedder (vector only)
+  factory.py.tmpl              get_*_repository() + the SWARM_DB_MODE switch + instance cache
+```
+
+It is separate from the *agent* template registry on purpose: `TemplateId`,
+`infer_template`, `TEMPLATE_CATALOG` and their tests stay untouched (an
+existing test asserts the agent catalog has exactly three entries), and the two
+catalogs answer different questions. An agent template is chosen — by the user
+or by inference — and then *filled by the model*; a database starter is the
+mechanical default for a new node, copied into the graph document when the node
+is created. Because the copy happens at creation and not at scaffold time,
+there is no hidden default applied during a compile: the Inspector shows the
+operation that will actually run, `db_starter_drift` can be computed by reading
+the kind's `starter.json` (through a lazy import inside the check, skipped
+entirely when the catalog cannot be imported), and a node whose operation was
+never materialized is refused by Phase 1 with `db_empty_operation`.
+
+`GET /api/database-starters` exposes the catalog (see
+[`api.md`](./api.md#get-apidatabase-starters)) behind the same lazy-import /
+`503` degradation seam as `GET /api/templates`: a broken catalog fails that one
+route rather than server startup. There is deliberately no copy of the starter
+literal in the web bundle — a second copy would drift from the server's, which
+is the failure mode this project already documents for `infer_template` — so
+while the catalog is unavailable the palette's three database entries render
+disabled with a hint.
+
+### `compile/database.py`: one renderer, two emitters
+
+Both compile targets emit the repository layer, so the rendering is shared
+rather than duplicated per scaffold. `compile/database.py` owns:
+
+| Function | Returns |
+|---|---|
+| `DATABASE_KINDS` / `used_db_kinds(graph)` | The kinds `{node.kind for node in graph.nodes} ∩ {"sql", "nosql", "vector"}` — the single gate every database artifact hangs from. |
+| `database_files_for(graph, package)` | Project-relative path → rendered content: `repositories/__init__.py`, `portshape.py`, one adapter module per kind used, `embedding.py` for vector, and `seed/<node_id>.sql` or `.json` per database node. |
+| `database_extra_lines(graph)` | The `[project.optional-dependencies]` body for the kinds used (`live-sql`, `live-nosql`, `live-vector`), empty when none. |
+| `database_env_lines(graph)` | The `.env.example` lines: `SWARM_DB_MODE` plus only the used engines' DSN keys (`SWARM_SQL_DSN`, `SWARM_NOSQL_DSN`, `SWARM_VECTOR_DSN`). |
+| `database_readme_section(graph)` | The generated README's "Database nodes" section, which names the file to edit and the exact `uv sync --extra live-<kind>` command per kind. |
+
+`package` is `swarm_workflow` on the PydanticAI target and `swarm_workflow_lg`
+on the LangGraph export — **one template set, two renders**, never two copies
+of the adapter code. Every `.tmpl` under `templates/database/` is rendered with
+`string.Template`, and the only variables are `$package` plus, in the factory
+template, `$kind_imports` and `$kind_getters` assembled from the per-kind
+blocks; seed paths are runtime arguments the emitted step passes, never baked
+into a template. The renderer places nothing itself: each emitter writes those
+files into its own package tree, because the step/node *bodies* differ
+(`StepContext` against `inputs`/`writes`) even though the repositories do not.
+
+When `used_db_kinds` is empty, nothing new is emitted anywhere — no repository
+module, no seed fixture, no extra, no env line, no README section and no dry-run
+assertion. A fixed document with no database node therefore scaffolds to
+byte-identical output on both targets, which is what makes the feature
+additive in fact rather than by inspection.
+
+### The generated `repositories/` tree
+
+```
+src/swarm_workflow/repositories/
+  __init__.py   get_sql_repository() / get_document_repository() / get_vector_repository(),
+                db_mode(), and the instance cache
+  portshape.py  as_port(), the row-to-port coercion, the placeholder rewrites
+  sql.py        SqlRepository Protocol, SqliteRepository (mock), PostgresRepository (live)
+  nosql.py      DocumentRepository Protocol, InMemoryDocumentRepository, MongoRepository
+  vector.py     VectorRepository Protocol, InMemoryVectorRepository, QdrantRepository
+  embedding.py  Embedder Protocol + deterministic HashEmbedder   (vector only)
+  seed/<node_id>.sql | .json   rendered from the node's spec, one per database node
+```
+
+**Why it is outside the fill agent's permitted paths.** `repositories/**` is
+scaffolded in Phase 2 and rewritten wholesale on every recompile, and it is not
+a permitted directory — `boundary.py`'s `DEFAULT_PERMITTED_DIRS` stays exactly
+`steps/*.py` and `agents/*.py` — so it lands in the **forbidden** tier, hashed
+whole-file against the Phase-2 baseline, and the fill agent's `write_region`
+refuses it. On the LangGraph side the same tree is added to
+`FORBIDDEN_DIRECTORIES` so the conversion agent's prompt names it, while the
+real enforcement remains the path guard. The reasoning is the read-only guard:
+the mock and the live adapters are where an emitted statement could be made to
+do something other than what the document declared, and a scaffolded-then-
+forbidden tree makes weakening them a boundary violation rather than a prompt
+instruction the model might ignore. A hand-edit is therefore reported
+(`forbidden_file_changed`, or `outside_marker_text_changed` if it were
+permitted) exactly as for `graph.py`.
+
+### The mock/live seam
+
+`repositories/__init__.py` is the one place that decides mock against live:
+
+```python
+DB_MODE_ENV_VAR = "SWARM_DB_MODE"
+
+def db_mode() -> str:
+    """'mock' (default when unset) or 'live'. An unrecognized value raises."""
+```
+
+- **Unset or empty means mock.** A typo such as `SWARM_DB_MODE=life` **raises**
+  naming the accepted values rather than running against the mock: a workflow
+  that silently answered from example data on a production run is the failure
+  this rule exists to make impossible. Live mode never degrades either — a
+  missing DSN names the variable, a missing driver names the extra.
+- **The driver import is lazy, and that is the whole point of the seam.** Each
+  live adapter is imported *inside* the live branch of its factory, so
+  `import swarm_workflow.graph` — the keyless gate's second step — succeeds on
+  a machine where no driver is installed. The drivers are opt-in extras,
+  declared only for the kinds the graph uses: `live-sql` → `psycopg[binary]`,
+  `live-nosql` → `pymongo`, `live-vector` → `qdrant-client`.
+  `check_pyproject_extras` is deliberately not broadened either: it still
+  inspects the bracketed `pydantic-ai-slim[...]` line only.
+- **The instance cache is keyed `(kind, seed_key)`**, where `seed_key` is a
+  stable digest of the rendered seed text. Two nodes of one kind over the same
+  seed share one in-memory database (so a write in an earlier step is visible
+  to a later node); two nodes over different seeds get independent databases,
+  so neither node's seed is silently ignored — Phase 1 warns about that case
+  (`db_separate_mock_instances`). A process-wide lock guards the SQLite
+  instance.
+- **Mock and live are separate modules, never an `if mock:` branch inside the
+  adapter.** A branch would let the mock rot into an approximation of the real
+  path; two modules behind one Protocol keep the mock a real implementation of
+  the same interface. The mock's own limits (in-memory and ephemeral, one
+  instance per seed, `aggregate` and schema introspection out of scope, a
+  lexical hash embedder rather than an embedding model) are stated in the
+  guide.
+- **The read path is enforced in emitted code.** The SQL mock runs a lexical
+  read-only check for the error message and, more importantly, arms a SQLite
+  `set_authorizer` that denies every action other than `SELECT`/`READ` while
+  `query()` executes — the lexical check alone accepts
+  `WITH x AS (…) INSERT INTO t … RETURNING *`. The live adapters reuse the
+  guards and set a read-only session or transaction.
+
+**Agent → repository tools** are emitted by one renderer,
+`_render_repository_tool`, available to **every** agent template rather than
+only `orchestrator`, and deliberately not reusing the delegate renderer (which
+hardcodes the delegating child's `query: str` signature). It types the tool
+from the database node's own declared I/O and can only run the node's declared
+*read* operation: there is **no free-form / text-to-SQL tool in v1**, which is
+what keeps prompt injection away from the database, and a write-mode node
+cannot be attached as a tool at all (`db_write_as_tool`). The seam for a future
+read-only exploration tool is named in the plan, not implemented.
 
 ## The deps_type seam
 
@@ -753,6 +949,55 @@ own `review()` is then the oracle: its errors are fed back to the model for
 at most two repair rounds — the same propose/check/report loop the fill agent
 runs with `parse_check`. `SWARM_FAKE_GENERATE=1` is the model-free twin of
 `SWARM_FAKE_FILL=1`.
+
+**Attachments and clarifying questions (`attachments/`, `vision.py`,
+`compile/clarify.py`).** Two extensions of the same flow, added by
+`PLAN-ATTACHMENTS-CLARIFY.md`, both keeping the graph document untouched.
+
+An attachment is *evidence for one description*, not part of the document. The
+route stores it under `workspace/attachments/<id>/` (uuid directory, one
+`os.rename` to publish, 6 h TTL, pruned on every upload and use) and returns an
+opaque id; a later request names ids, and the store enforces the count and
+total-size caps from record metadata before reading anything. Reading is where
+the danger is, so it is bounded on every axis: the extension picks the reader,
+the container's declared uncompressed size is checked *before* `openpyxl` or
+`python-pptx` is imported (a 10 MiB workbook can otherwise inflate to
+gigabytes), parsing runs in a worker thread under a per-file timeout inside a
+process-wide semaphore, and every structure cap (sheets, slides, rows, columns,
+cell length, characters) is reported in `notes` rather than applied silently.
+Parser exception text never escapes: it is mapped to a fixed, app-authored
+sentence, so no error body, log line, or stored note can carry a workspace path
+or a cell of a confidential spreadsheet. `render_attachments_context` turns the
+extracts into one labelled block bounded by 60k characters, framed explicitly as
+context rather than a step list.
+
+Images are the one kind whose content is not text, so they need a model that can
+see. `vision.py` holds the single table of ids documented as image-capable
+(DeepSeek's `deepseek-flash`, which is what this app resolves to, plus the
+Claude/GPT/Gemini/Pixtral families), checked at upload **and** again at
+generate/clarify because the model can change in between. An unrecognised id is
+refused with a message naming both fixes — a false negative costs one message,
+where sending bytes a text-only model rejects costs a failed generation and a
+raw provider error. The gate never becomes a credential bypass: a vision-capable
+model without a key still fails at the existing credential check.
+
+The clarify pass is one model call (`compile/clarify.py`) before drafting,
+mirroring the generator's structure (`PromptedOutput`, no repair loop, the same
+request budget). Its output schema is deliberately **permissive** — no
+`min_length` on options, no model-chosen ids — because `PromptedOutput` validates
+before any of our code runs, so a constraint there would turn a sloppy answer
+into a `502` instead of fewer questions. All bounding happens in
+`sanitize_analysis`: truncate to four, drop unusable questions, coerce an
+out-of-list recommendation, assign `q1…`, and force `needsClarification` to
+agree with the question list. Answers then travel into the drafter as a separate,
+explicitly authoritative prompt part; the attachment context and image parts
+follow it. With neither files nor answers, `build_prompt_parts` returns the bare
+description — byte for byte the prompt this endpoint sent before the feature
+existed, which is asserted by test.
+
+The fake-switch constant moved to `runtime.py` (`fake_draft_enabled`) so the
+analysis pass and the drafter cannot disagree, and the dependency runs one way:
+`compile/generate.py` imports `ClarifyAnswerIn` from `compile/clarify.py`.
 
 **LangGraph target (`compile/langgraph/`).** A ``target="langgraph"``
 compile runs the five standard phases and then four more on the *validated*

@@ -1,0 +1,101 @@
+"""The generated project's repository factory: one seam, mock or live.
+
+``SWARM_DB_MODE`` selects the implementation and is read from the environment,
+never stored in the graph document: a document is shareable and a credential
+seam is not. Mock is the default, and mock is what the validation gate runs --
+every database node has a seeded in-memory implementation with no driver, no
+server and no network.
+
+Three rules this module exists to keep:
+
+- **Live is opt-in and lazy.** A live adapter's driver is imported inside the
+  live branch only, so ``import <package>.graph`` succeeds with nothing
+  installed and the driver stays an optional extra
+  (``uv sync --extra live-<kind>``). That import is the single documented
+  degradation seam in this file.
+- **Mock instances are per ``(kind, seed)``, not per process.** Two nodes over
+  the same seed share one mock (so a write in one step is visible to a later
+  one), and two nodes over different seeds never contaminate each other. The
+  seed is a *runtime argument*, deliberately never baked into this module, so
+  two compiles of two graphs cannot disagree about which seed an instance has.
+- **No silent fallback.** A ``SWARM_DB_MODE`` value that is neither mock nor
+  live raises, rather than quietly reading example data while the user believes
+  they are on a real database.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import threading
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+$kind_imports
+from $package.repositories.portshape import as_port, expand_list_param, to_psycopg
+
+DB_MODE_ENV_VAR = "SWARM_DB_MODE"
+MOCK = "mock"
+LIVE = "live"
+
+#: One lock for every mock instance in this process. The SQLite mock shares one
+#: connection across steps, and steps can run concurrently, so
+#: ``check_same_thread=False`` without a lock would be a silent corruption risk.
+_INSTANCE_LOCK = threading.Lock()
+_INSTANCES: dict[tuple[str, str], Any] = {}
+
+
+def db_mode() -> str:
+    """'mock' (default when unset) or 'live'. An unrecognized value raises."""
+    raw = os.environ.get(DB_MODE_ENV_VAR, "").strip().lower()
+    if raw in ("", MOCK):
+        return MOCK
+    if raw == LIVE:
+        return LIVE
+    raise ValueError(
+        f"{DB_MODE_ENV_VAR}={raw!r} is not a supported mode; use {MOCK!r} or {LIVE!r}"
+    )
+
+
+def seed_key(seed_path: Path) -> str:
+    """A stable digest of a node's rendered seed file.
+
+    The cache key is the seed's *content*, not its path: two nodes with the
+    same seed must share one mock even though their seed files are two
+    different files, and a recompile -- which rewrites every seed file wholesale
+    -- must not silently hand back a database built from a seed that no longer
+    exists.
+    """
+    return hashlib.blake2b(Path(seed_path).read_bytes(), digest_size=16).hexdigest()
+
+
+def _instance(key: tuple[str, str], factory: Callable[[], Any]) -> Any:
+    """One instance per ``(kind, seed key)``, created on first use.
+
+    Never "first constructor wins": the key carries the seed, so a second node
+    with a different seed gets its own mock instead of inheriting the first
+    node's rows -- an inherited mock would silently ignore the second node's
+    declared seed.
+    """
+    with _INSTANCE_LOCK:
+        if key not in _INSTANCES:
+            _INSTANCES[key] = factory()
+        return _INSTANCES[key]
+
+
+def _live_collection(collection: str | None, env_var: str) -> str:
+    """The live engine's collection: the node's declared one, or its env var.
+
+    ``nosql.collection``/``vector.collection`` is declared data, so the emitted
+    step passes it in. The environment variable exists for a caller holding only
+    a seed path. Neither is defaulted to an invented collection name: reading
+    the wrong collection silently is worse than an error that names the missing
+    variable.
+    """
+    if collection:
+        return collection
+    return os.environ[env_var]
+
+
+$kind_getters

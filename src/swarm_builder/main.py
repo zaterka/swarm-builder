@@ -29,8 +29,8 @@ from fastapi.staticfiles import StaticFiles
 
 from swarm_builder import __version__, runtime
 from swarm_builder.config import REPO_ROOT, get_host, get_port, load_env_file
-from swarm_builder.routes import compile as compile_routes
 from swarm_builder.routes import (
+    attachments,
     export,
     generate,
     graphs,
@@ -40,6 +40,7 @@ from swarm_builder.routes import (
     settings,
     templates,
 )
+from swarm_builder.routes import compile as compile_routes
 
 
 @asynccontextmanager
@@ -94,6 +95,7 @@ def create_app() -> FastAPI:
     app.include_router(compile_routes.router, prefix="/api")
     app.include_router(runs.router, prefix="/api")
     app.include_router(generate.router, prefix="/api")
+    app.include_router(attachments.router, prefix="/api")
 
     web_dist = REPO_ROOT / "web" / "dist"
     if (web_dist / "index.html").exists():

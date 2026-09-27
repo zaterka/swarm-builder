@@ -1,4 +1,4 @@
-import type { CompileSnapshot, SwarmGraph } from '../src/api/schema';
+import type { CompileSnapshot, DatabaseStarterOut, SwarmGraph } from '../src/api/schema';
 
 // A review-clean fixture graph -- every edge endpoint refers to a real
 // node id, entry/exit are set, and specs match their node kind. Kept
@@ -129,6 +129,80 @@ export function renderOnlyFixtureGraph(): SwarmGraph {
         decision: null,
         join: { reducer: 'list_append', initialFactory: 'list' },
       },
+      // One node per database kind, so the canvas smoke test proves all three
+      // are registered in `nodeTypes` and paint their own `data-node-kind`.
+      {
+        id: 'sql_node',
+        kind: 'sql',
+        title: 'SQL node',
+        intent: 'Look up one row by name.',
+        position: { x: 0, y: 300 },
+        template: null,
+        io: { inputType: 'str', outputType: 'list[json]' },
+        reads: [],
+        writes: [],
+        agent: null,
+        programmatic: null,
+        decision: null,
+        join: null,
+        sql: {
+          query: 'SELECT id FROM widgets WHERE name = :input',
+          seedSql: 'CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n',
+          write: false,
+          note: null,
+        },
+        nosql: null,
+        vector: null,
+      },
+      {
+        id: 'nosql_node',
+        kind: 'nosql',
+        title: 'NoSQL node',
+        intent: 'Find the notes for one topic.',
+        position: { x: 250, y: 300 },
+        template: null,
+        io: { inputType: 'str', outputType: 'list[json]' },
+        reads: [],
+        writes: [],
+        agent: null,
+        programmatic: null,
+        decision: null,
+        join: null,
+        sql: null,
+        nosql: {
+          collection: 'fixture_notes',
+          operation: 'find',
+          filter: { topic: '$input' },
+          limit: 5,
+          seed: [{ _id: 'n-1', topic: 'alpha' }],
+          note: null,
+        },
+        vector: null,
+      },
+      {
+        id: 'vector_node',
+        kind: 'vector',
+        title: 'Vector node',
+        intent: 'Search the fixture docs.',
+        position: { x: 500, y: 300 },
+        template: null,
+        io: { inputType: 'str', outputType: 'list[json]' },
+        reads: [],
+        writes: [],
+        agent: null,
+        programmatic: null,
+        decision: null,
+        join: null,
+        sql: null,
+        nosql: null,
+        vector: {
+          collection: 'fixture_docs',
+          topK: 2,
+          minScore: 0,
+          seed: [{ id: 'd-1', text: 'A fixture document.', metadata: { section: 'intro' } }],
+          note: null,
+        },
+      },
     ],
     edges: [
       { kind: 'seq', id: 'e-seq', source: 'agent_node', target: 'programmatic_node', label: 'next' },
@@ -221,5 +295,69 @@ export function compileSseFramesFixture(): string[] {
     'id: 7\r\nevent: warning\r\ndata: {"code":"state_field_unused","message":"state field \'notes\' is declared but never read","nodeIds":["search_the_web"],"eventId":7,"createdAt":"2026-09-16T23:40:20.121004+00:00"}\r\n\r\n',
     'id: 8\r\nevent: log\r\ndata: {"message":"scaffolded 7 files","eventId":8,"createdAt":"2026-09-16T23:40:20.190552+00:00"}\r\n\r\n',
     'id: 9\r\nevent: done\r\ndata: {"projectPath":"/tmp/swarm-workspace/projects/linear-chat","runCommand":"cd /tmp/swarm-workspace/projects/linear-chat && UV_CACHE_DIR=/tmp/uv-cache uv sync && UV_CACHE_DIR=/tmp/uv-cache uv run python validate/dry_run.py","diagram":"stateDiagram-v2\\n  intake\\n  chat_step\\n  summarize\\n\\n  [*] --> intake\\n  intake --> chat_step\\n  chat_step --> summarize\\n  summarize --> [*]","filledNodeIds":["intake","summarize"],"attempts":1,"model":{"provider":"deepseek-official","model":"deepseek-flash","source":"settings-default"},"validationSteps":["uv_sync","keyless_import","dry_run"],"eventId":9,"createdAt":"2026-09-16T23:40:22.457911+00:00"}\r\n\r\n',
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Database starter catalog
+// ---------------------------------------------------------------------------
+
+/**
+ * A stand-in for `GET /api/database-starters`, one entry per kind.
+ *
+ * These are **test** values, deliberately different from the server's own
+ * starter (different tables, collections and documents) so that a passing test
+ * cannot be explained by a copy of the real starter: the production code has no
+ * starter literal at all, and these fixtures only ever prove that whatever the
+ * catalog serves is what a node is created from. The route's real payload is
+ * covered by `PydanticAI`'s own tests and by `test_api_settings.py`'s sweep.
+ */
+export function databaseStartersFixture(): DatabaseStarterOut[] {
+  return [
+    {
+      kind: 'sql',
+      label: 'SQL (fixture widgets)',
+      description: 'Fixture example: one table, one row.',
+      spec: {
+        query: 'SELECT id FROM widgets WHERE name = :input',
+        seedSql: 'CREATE TABLE widgets (id INTEGER PRIMARY KEY, name TEXT NOT NULL);\n',
+        write: false,
+        note: 'fixture',
+      },
+      io: { inputType: 'str', outputType: 'list[json]' },
+      liveExtra: 'live-sql',
+      envVars: ['SWARM_SQL_DSN'],
+    },
+    {
+      kind: 'nosql',
+      label: 'NoSQL (fixture notes)',
+      description: 'Fixture example: one collection, one document.',
+      spec: {
+        collection: 'fixture_notes',
+        operation: 'find',
+        filter: { topic: '$input' },
+        limit: 5,
+        seed: [{ _id: 'n-1', topic: 'alpha' }],
+        note: 'fixture',
+      },
+      io: { inputType: 'str', outputType: 'list[json]' },
+      liveExtra: 'live-nosql',
+      envVars: ['SWARM_NOSQL_DSN'],
+    },
+    {
+      kind: 'vector',
+      label: 'Vector (fixture docs)',
+      description: 'Fixture example: one collection, one document.',
+      spec: {
+        collection: 'fixture_docs',
+        topK: 2,
+        minScore: 0,
+        seed: [{ id: 'd-1', text: 'A fixture document.', metadata: { section: 'intro' } }],
+        note: 'fixture',
+      },
+      io: { inputType: 'str', outputType: 'list[json]' },
+      liveExtra: 'live-vector',
+      envVars: ['SWARM_VECTOR_DSN'],
+    },
   ];
 }

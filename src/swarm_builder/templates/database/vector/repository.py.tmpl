@@ -1,0 +1,277 @@
+"""Vector repositories: an in-memory index and a Qdrant live adapter.
+
+Mock is the default and needs nothing installed: the seed's documents are
+embedded once with the project's deterministic local embedder and searched by
+cosine similarity. Live needs ``SWARM_DB_MODE=live``, ``SWARM_VECTOR_DSN``,
+``SWARM_VECTOR_COLLECTION`` and the client:
+
+```bash
+uv sync --extra live-vector
+```
+
+``SWARM_VECTOR_API_KEY`` is optional and is what a hosted endpoint (Qdrant
+Cloud) adds on top of the DSN: it is read from the environment and handed to the
+client, and an unset -- or empty -- value means "no key", which is the ordinary
+case for a local, unauthenticated Qdrant. Going live therefore still requires
+only the DSN variable below, never a key.
+
+The live client is imported inside :meth:`QdrantRepository.__init__` -- never at
+module import time -- so ``import <package>.graph`` succeeds with nothing
+installed.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import uuid
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Protocol
+
+from $package.repositories.embedding import Embedder, HashEmbedder
+
+#: A fixed namespace for mapping a document's readable id to a Qdrant point id;
+#: fixed, so the same seed always addresses the same points.
+_POINT_ID_NAMESPACE = uuid.UUID("2f7b1c4e-9a3d-4f6b-8e21-5c0d7a9b3e11")
+
+#: The optional credential of a hosted endpoint. Read from the environment
+#: rather than taken as an argument of the repository: the emitted factory passes
+#: exactly what the *node* declares (its URL and its collection), so a secret has
+#: one home -- the environment -- and never reaches a graph document.
+_API_KEY_ENV_VAR = "SWARM_VECTOR_API_KEY"
+
+
+def api_key_from_env() -> str | None:
+    """``SWARM_VECTOR_API_KEY`` when it carries a value, else ``None``.
+
+    Optional by design, and deliberately *not* a second required variable: a
+    local Qdrant is normally unauthenticated, and the generated ``.env.example``
+    ships this variable with an empty value, so ``""`` (or whitespace) has to
+    mean "no key" rather than an empty credential. ``None`` is what the client
+    itself expects for an endpoint that wants no key.
+
+    Returns:
+        The key, stripped, or ``None`` when the variable is unset or blank.
+    """
+    return os.environ.get(_API_KEY_ENV_VAR, "").strip() or None
+
+
+class VectorRepository(Protocol):
+    """The surface a vector node's step, and any read-only tool built from it, is
+    typed against.
+
+    ``search`` is read-only, which is why it is the only method an agent tool can
+    reach; ``upsert`` exists for seeding and for the user's own code and is
+    deliberately never emitted as a step or a tool.
+    """
+
+    def search(
+        self, text: str, top_k: int = 4, min_score: float = 0.0
+    ) -> list[dict[str, Any]]:
+        """Return the documents nearest to ``text``, best first."""
+        ...
+
+    def upsert(self, documents: Sequence[Mapping[str, Any]]) -> int:
+        """Add or replace documents by id; returns how many were written."""
+        ...
+
+
+def _document(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """One stored document, normalized to the shape ``search`` returns.
+
+    A seed row without an id or text is a defect in the node's declared seed, so
+    it raises here -- while the message can still name the seed file -- rather
+    than producing hits with ``None`` in them.
+    """
+    identifier = raw.get("id")
+    text = raw.get("text")
+    if not isinstance(identifier, str) or not identifier:
+        raise ValueError(f"a vector document needs a non-empty 'id' string, got {identifier!r}")
+    if not isinstance(text, str):
+        raise ValueError(
+            f"vector document {identifier!r} needs a 'text' string, got {type(text).__name__}"
+        )
+    metadata = raw.get("metadata") or {}
+    if not isinstance(metadata, Mapping):
+        raise ValueError(
+            f"vector document {identifier!r} has a non-object 'metadata' field "
+            f"({type(metadata).__name__})"
+        )
+    return {"id": identifier, "text": text, "metadata": dict(metadata)}
+
+
+def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
+    """Cosine similarity of two vectors.
+
+    Both sides are unit vectors, so this is a dot product. A dimension mismatch
+    raises rather than comparing a prefix of two different embeddings, which
+    would rank documents against a query they never matched.
+    """
+    if len(left) != len(right):
+        raise ValueError(f"vectors of different dimensions: {len(left)} != {len(right)}")
+    return sum(a * b for a, b in zip(left, right))
+
+
+class InMemoryVectorRepository:
+    """The mock: the seed documents, embedded once, held in memory.
+
+    Ephemeral by design (the generated README says so): ``upsert`` writes to this
+    process's copy and a restart re-reads the seed.
+    """
+
+    def __init__(self, seed_path: Path, embedder: Embedder | None = None) -> None:
+        self.seed_path = Path(seed_path)
+        self._embedder = embedder or HashEmbedder()
+        self._documents: list[dict[str, Any]] = []
+        self._vectors: dict[str, list[float]] = {}
+        documents = json.loads(self.seed_path.read_text(encoding="utf-8"))
+        if not isinstance(documents, list) or not all(
+            isinstance(document, Mapping) for document in documents
+        ):
+            raise ValueError(
+                f"{self.seed_path} must hold a JSON array of documents, one object per "
+                "document -- the shape the node's seed declares"
+            )
+        # Seeding goes through the same path as any later write, so the two can
+        # never disagree about what "in the index" means.
+        self.upsert(documents)
+
+    def search(
+        self, text: str, top_k: int = 4, min_score: float = 0.0
+    ) -> list[dict[str, Any]]:
+        """The documents nearest to ``text``, best first.
+
+        Sorted by ``(-score, id)``: equal scores break on the document id, so the
+        *order* is as reproducible as the scores are. Ties broken by insertion
+        order would make the result depend on something the document does not
+        declare, and two runs of one graph could disagree.
+
+        ``score`` is cosine similarity in ``[-1, 1]``, so the default
+        ``min_score=0.0`` means "no threshold" rather than "no weak matches".
+        ``top_k <= 0`` means no limit.
+        """
+        query = self._embedder.embed(text)
+        hits = [
+            {**document, "score": _cosine(query, self._vectors[document["id"]])}
+            for document in self._documents
+        ]
+        hits = [hit for hit in hits if hit["score"] >= min_score]
+        hits.sort(key=lambda hit: (-hit["score"], hit["id"]))
+        return hits if top_k <= 0 else hits[:top_k]
+
+    def upsert(self, documents: Sequence[Mapping[str, Any]]) -> int:
+        """Add or replace documents by id; returns how many were written.
+
+        A replaced document keeps its position-independent identity (its id) and
+        gets a fresh embedding, which is what a mock needs after the user edits a
+        seed and recompiles.
+        """
+        written = 0
+        for raw in documents:
+            document = _document(raw)
+            self._documents = [item for item in self._documents if item["id"] != document["id"]]
+            self._documents.append(document)
+            self._vectors[document["id"]] = self._embedder.embed(document["text"])
+            written += 1
+        return written
+
+
+def _point_id(identifier: str) -> str:
+    """The Qdrant point id for a document id.
+
+    Qdrant accepts only UUIDs and unsigned integers as point ids while a node's
+    seed declares readable string ids, so the id is uuid5-mapped -- the original
+    id stays in the payload and comes back in every hit.
+    """
+    return str(uuid.uuid5(_POINT_ID_NAMESPACE, identifier))
+
+
+class QdrantRepository:
+    """The live adapter: qdrant-client over ``SWARM_VECTOR_DSN``.
+
+    ``SWARM_VECTOR_API_KEY`` is handed to the client when it is set, which is
+    what a hosted endpoint (Qdrant Cloud) requires on top of the URL; when it is
+    unset the client gets ``None``, its own default, so a local unauthenticated
+    Qdrant keeps working unchanged.
+
+    The shipped embedder is the same deterministic :class:`HashEmbedder` the mock
+    uses, so live mode needs no second configuration surface -- but a hash
+    embedder's recall against a real collection is poor, and that is the one part
+    of this path that cannot be defaulted well. Pass your provider's embedder to
+    ``QdrantRepository`` (or change the default below) before relying on search
+    quality; the collection must already exist with a matching vector size and
+    cosine distance, and a missing or mismatched one raises here rather than
+    returning nothing.
+    """
+
+    def __init__(self, url: str, collection: str, embedder: Embedder | None = None) -> None:
+        # Lazy, and the only place the driver is touched: qdrant-client is an
+        # optional extra (`uv sync --extra live-vector`), so importing it at
+        # module import time would break the keyless gate.
+        try:
+            from qdrant_client import QdrantClient
+            from qdrant_client.http import models as qdrant_models
+        except ImportError as exc:  # pragma: no cover - the gate never gets here
+            raise RuntimeError(
+                "the live vector adapter needs the qdrant-client driver: install it with "
+                "`uv sync --extra live-vector` and set SWARM_VECTOR_DSN"
+            ) from exc
+        self._models = qdrant_models
+        # The key is passed unconditionally, and `api_key=None` is the client's
+        # own default: a hosted endpoint needs the key, and a local one is
+        # unaffected by it. Only SWARM_VECTOR_DSN is required (the factory reads
+        # it), so an unauthenticated Qdrant never has to invent a credential.
+        self._client = QdrantClient(url=url, api_key=api_key_from_env())
+        self._collection = collection or os.environ["SWARM_VECTOR_COLLECTION"]
+        self._embedder = embedder or HashEmbedder()
+        if not self._client.collection_exists(self._collection):
+            raise RuntimeError(
+                f"the Qdrant collection {self._collection!r} does not exist; create it with "
+                f"size {len(self._embedder.embed('x'))} and cosine distance, or point "
+                "SWARM_VECTOR_COLLECTION at an existing collection"
+            )
+
+    def search(
+        self, text: str, top_k: int = 4, min_score: float = 0.0
+    ) -> list[dict[str, Any]]:
+        """The documents nearest to ``text``, in the mock's ``(-score, id)`` order."""
+        scored = self._client.search(
+            collection_name=self._collection,
+            query_vector=self._embedder.embed(text),
+            limit=top_k if top_k > 0 else 100,
+            score_threshold=min_score,
+            with_payload=True,
+        )
+        hits = []
+        for hit in scored:
+            payload = dict(hit.payload or {})
+            identifier = str(payload.get("id", hit.id))
+            hits.append(
+                {
+                    "id": identifier,
+                    "text": str(payload.get("text", "")),
+                    "metadata": dict(payload.get("metadata") or {}),
+                    "score": float(hit.score),
+                }
+            )
+        # The driver returns score order; sort anyway, so live and mock agree on
+        # how a tie is broken instead of differing on which document comes first.
+        hits.sort(key=lambda hit: (-hit["score"], hit["id"]))
+        return hits
+
+    def upsert(self, documents: Sequence[Mapping[str, Any]]) -> int:
+        """Add or replace documents by id; returns how many were written."""
+        points = []
+        for raw in documents:
+            document = _document(raw)
+            points.append(
+                self._models.PointStruct(
+                    id=_point_id(document["id"]),
+                    vector=self._embedder.embed(document["text"]),
+                    payload=document,
+                )
+            )
+        if points:
+            self._client.upsert(collection_name=self._collection, points=points)
+        return len(points)

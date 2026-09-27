@@ -43,6 +43,8 @@ export function StateFieldsPanel() {
         return 'literal Python source, e.g. \'""\' or "\'hello\'"';
       case 'list[str]':
         return 'literal Python source, e.g. "[]"';
+      case 'list[json]':
+        return 'literal Python source, e.g. "[]" or \'[{"key": "value"}]\'';
       case 'json':
         return 'literal Python source, e.g. "{}" or "0"';
     }

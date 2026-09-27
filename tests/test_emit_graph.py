@@ -5,13 +5,34 @@ lives in test_codegen_fixtures.py)."""
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
+
+import pytest
+
 from fixtures.graphs import (
     decision_branching_graph,
     fanout_join_graph,
     linear_chat_graph,
+    nosql_query_graph,
     orchestrator_graph,
+    sql_lookup_graph,
+    vector_search_graph,
 )
 from swarm_builder.compile.emit_graph import emit_graph
+from swarm_builder.models import AgentSpec, DelegateEdge, NodeIo, SeqEdge, SwarmGraph, SwarmNode
+
+#: kind -> the fixture that builds a graph around one node of that kind.
+DATABASE_FIXTURES = {
+    "sql": sql_lookup_graph,
+    "nosql": nosql_query_graph,
+    "vector": vector_search_graph,
+}
+
+
+def _database_node_id(graph: SwarmGraph) -> str:
+    """The id of the graph's one database node."""
+    return next(node.id for node in graph.nodes if node.kind in DATABASE_FIXTURES)
 
 
 def test_never_calls_graph_constructor_directly() -> None:
@@ -183,3 +204,134 @@ def test_scaffolding_the_same_fixture_twice_is_byte_identical() -> None:
             text_a = (Path(tmp_a) / rel_path).read_text()
             text_b = (Path(tmp_b) / rel_path).read_text()
             assert text_a == text_b, f"{rel_path} differs between two scaffolds of the same fixture"
+
+
+# ---------------------------------------------------------------------------
+# Database nodes: real steps, never bare variables, never delegate-only children
+# (PLAN-DB-NODES.md §4.0 items 6-9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", sorted(DATABASE_FIXTURES))
+def test_database_kinds_are_emitted_as_builder_steps(kind: str) -> None:
+    """§4.0 item 6: a database node is a ``builder.step(...)`` with an explicit
+    ``node_id``, imported from its own ``steps/<id>`` module -- leaving it out of
+    ``STEP_KINDS`` emitted a ``graph.py`` that never ran the node at all."""
+    graph = DATABASE_FIXTURES[kind]()
+    node_id = _database_node_id(graph)
+    source = emit_graph(graph)
+    assert f'builder.step({node_id}, node_id="{node_id}")' in source
+    assert f"from swarm_workflow.steps.{node_id} import {node_id}" in source
+
+
+@pytest.mark.parametrize("kind", sorted(DATABASE_FIXTURES))
+def test_database_kinds_are_never_bare_builder_variables(kind: str) -> None:
+    """A bare-variable kind is one whose builder call returns a *builder*
+    (``decision``/``join``). A database node's call returns the step function, so
+    binding the bare id would collide with the imported step name and the node
+    would never be registered."""
+    graph = DATABASE_FIXTURES[kind]()
+    node_id = _database_node_id(graph)
+    source = emit_graph(graph)
+    assert not re.search(rf"^{node_id} = ", source, re.MULTILINE)
+    assert f"{node_id} = builder.step(" not in source
+    assert f"{node_id}_node = builder.step({node_id}" in source
+
+
+@pytest.mark.parametrize("kind", sorted(DATABASE_FIXTURES))
+def test_run_tracer_step_list_contains_database_node_ids(kind: str, tmp_path: Path) -> None:
+    """§4.0 item 9: the Run tracer wraps exactly the step ids it is given, so a
+    database step omitted from that list runs while the canvas shows nothing for
+    it -- a silently invisible node."""
+    import tempfile
+
+    from swarm_builder.compile import default_scaffold_model
+    from swarm_builder.compile.scaffold import scaffold
+
+    graph = DATABASE_FIXTURES[kind]()
+    with tempfile.TemporaryDirectory() as tmp:
+        scaffold(graph, Path(tmp), default_scaffold_model())
+        tracer = (Path(tmp) / "run" / "stream_run.py").read_text()
+    expected = ", ".join(f'"{node.id}"' for node in sorted(graph.nodes, key=lambda n: n.id))
+    assert f"STEP_NODE_IDS = [{expected}]" in tracer
+
+
+def test_a_list_json_port_goes_through_the_annotation_table() -> None:
+    """Contract rule 9 for the new port type: ``list[json]`` is a *label*, so it is
+    never interpolated verbatim (``output_type=list[json]`` is a NameError) -- and its
+    annotation needs ``typing.Any``, which ``PORT_TYPE_IMPORTS`` is asked for rather
+    than guessed from the annotation text."""
+    graph = sql_lookup_graph()
+    nodes = [
+        node.model_copy(update={"io": NodeIo(input_type="list[json]", output_type="list[json]")})
+        if node.id == "format_orders"
+        else node
+        for node in graph.nodes
+    ]
+    source = emit_graph(graph.model_copy(update={"nodes": nodes}))
+    assert "output_type=list[dict[str, Any]]" in source
+    assert "output_type=list[json]" not in source
+    assert "from typing import Any" in source
+
+
+def _delegate_only_database_graph() -> SwarmGraph:
+    """A graph whose SQL node is reachable *only* through a delegate edge.
+
+    The same carve-out a delegate-only *agent* child gets: a node reached only by
+    delegation is called as a tool by its orchestrator and never emitted as a
+    graph step, so it must get no ``builder.step`` and no ``steps/<id>.py`` -- and
+    nothing in the wiring may reference a builder variable for it.
+
+    The orchestrator does not name ``orders_db`` in ``delegatesTo`` either: that
+    field renders one tool per child, and a child with no agent module cannot be
+    called that way. A database node is attached to an agent through
+    ``agent.tools`` (``sql:<id>``), which is a different mechanism -- see
+    ``test_agent.py``'s repository-tool tests.
+    """
+    graph = sql_lookup_graph()
+    reader = SwarmNode(
+        id="reader",
+        kind="agent",
+        title="Reader",
+        intent="Ask the database node for the customer's orders.",
+        position=graph.nodes[0].position,
+        template="orchestrator",
+        io=NodeIo(input_type="str", output_type="list[json]"),
+        agent=AgentSpec(instructions="Read the orders."),
+    )
+    format_orders = next(node for node in graph.nodes if node.id == "format_orders")
+    orders_db = next(node for node in graph.nodes if node.id == "orders_db")
+    return graph.model_copy(
+        update={
+            "nodes": [orders_db, reader, format_orders],
+            "edges": [
+                DelegateEdge(kind="delegate", id="e1", source="reader", target="orders_db"),
+                SeqEdge(kind="seq", id="e2", source="reader", target="format_orders"),
+            ],
+            "entry_node_id": "reader",
+            "exit_node_id": "format_orders",
+        }
+    )
+
+
+def test_a_delegate_only_database_node_is_not_a_step(tmp_path: Path) -> None:
+    """The ``delegate_only_node_ids`` carve-out is kept for database nodes."""
+    import tempfile
+
+    from swarm_builder.compile import default_scaffold_model
+    from swarm_builder.compile.graph_ir import analyze
+    from swarm_builder.compile.scaffold import scaffold
+
+    graph = _delegate_only_database_graph()
+    structure = analyze(graph)
+    assert "orders_db" in structure.delegate_only_node_ids
+    source = emit_graph(graph)
+    assert "builder.step(orders_db" not in source
+    assert "from swarm_workflow.steps.orders_db import" not in source
+    with tempfile.TemporaryDirectory() as tmp:
+        project = Path(tmp)
+        scaffold(graph, project, default_scaffold_model())
+        assert not (project / "src" / "swarm_workflow" / "steps" / "orders_db.py").exists()
+        # The node still exists as a database node, so the repository layer it
+        # needs is still emitted -- it is a tool's target, not a step.
+        assert (project / "src" / "swarm_workflow" / "repositories" / "sql.py").is_file()

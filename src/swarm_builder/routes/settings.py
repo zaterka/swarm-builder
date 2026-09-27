@@ -50,6 +50,7 @@ from swarm_builder.appconfig import (
 from swarm_builder.config import get_app_config_path, get_dsh_home, get_workspace_dir
 from swarm_builder.inherit.routes import UnmappableRouteError, build_live_model
 from swarm_builder.inherit.settings import read_settings, resolve_effective_model
+from swarm_builder.known_models import resolve_max_output_tokens
 from swarm_builder.providers import PROVIDERS, ProviderSpec
 from swarm_builder.routes.health import _path_writable
 from swarm_builder.routes.llm_routes import ResolvedDefaultOut
@@ -116,6 +117,7 @@ class SavedModelOut(_CamelModel):
     model: str
     base_url: str | None
     reasoning_effort: str | None
+    max_tokens: int | None
     has_api_key: bool
     api_key_hint: str | None
 
@@ -131,6 +133,9 @@ class SettingsResponse(_CamelModel):
     dry_run_env_vars: list[str]
     providers: list[ProviderOut]
     resolved_default: ResolvedDefaultOut
+    #: The output budget a compile would use when no user override is set, so
+    #: the settings screen can show "default: N" in the Max output tokens field.
+    max_tokens_default: int
     #: How many routes an inherited ``settings.yaml`` contributes, so the
     #: advanced footer can say "also inheriting N routes" without pretending
     #: the file is required.
@@ -158,6 +163,7 @@ class ModelInput(_CamelModel):
     #: not care about.
     clear_api_key: bool | None = None
     reasoning_effort: str | None = None
+    max_tokens: int | None = None
 
 
 class SettingsUpdateRequest(_CamelModel):
@@ -237,6 +243,7 @@ def _saved_model_out(model: AppModelConfig | None) -> SavedModelOut | None:
         model=model.model,
         base_url=model.base_url,
         reasoning_effort=model.reasoning_effort,
+        max_tokens=model.max_tokens,
         has_api_key=bool(model.api_key),
         api_key_hint=_api_key_hint(model.api_key),
     )
@@ -295,14 +302,6 @@ def _provider_out(spec: ProviderSpec, saved: AppModelConfig | None) -> ProviderO
     )
 
 
-def _resolved_default() -> ResolvedDefaultOut:
-    """What a compile would spend with the current configuration."""
-    effective = resolve_effective_model(get_dsh_home())
-    return ResolvedDefaultOut(
-        provider=effective.provider, model=effective.model, source=effective.source
-    )
-
-
 def _settings_response(cfg: AppConfig | None) -> SettingsResponse:
     """Build the shared GET/PUT response body from one config read."""
     saved = cfg.model if cfg is not None else None
@@ -316,6 +315,7 @@ def _settings_response(cfg: AppConfig | None) -> SettingsResponse:
     # entry that cannot be used. Resolution ignores either, so the screen has
     # to say so rather than let a fallthrough look like success.
     problems = config_problems(cfg)
+    effective = resolve_effective_model(get_dsh_home())
     return SettingsResponse(
         config_path=str(get_app_config_path()),
         config_error="; ".join(problems) if problems else None,
@@ -324,7 +324,10 @@ def _settings_response(cfg: AppConfig | None) -> SettingsResponse:
         dry_run_forced_by_env=runtime.dry_run_forced_by_env(),
         dry_run_env_vars=runtime.dry_run_forced_env_vars(),
         providers=[_provider_out(spec, saved) for spec in PROVIDERS],
-        resolved_default=_resolved_default(),
+        resolved_default=ResolvedDefaultOut(
+            provider=effective.provider, model=effective.model, source=effective.source
+        ),
+        max_tokens_default=resolve_max_output_tokens(effective.model, None),
         inherited_routes=inherited_routes,
         workspace_writable=_path_writable(get_workspace_dir()),
     )
@@ -423,6 +426,7 @@ def _put_settings_locked(body: SettingsUpdateRequest) -> SettingsResponse:
             api_key=body.model.api_key,
             clear_api_key=body.model.clear_api_key is True,
             reasoning_effort=body.model.reasoning_effort,
+            max_tokens=body.model.max_tokens,
         )
         problems = validate_model_config(new_model)
         if problems:

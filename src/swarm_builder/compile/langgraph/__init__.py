@@ -44,10 +44,20 @@ PACKAGE_NAME = "swarm_workflow_lg"
 #: Project-relative directory of the editable node modules.
 NODES_DIR_PARTS: tuple[str, ...] = ("src", PACKAGE_NAME, "nodes")
 
+#: Project-relative directory holding the generated repository layer
+#: (``compile/database.py`` renders it, the scaffolder writes it). Named here
+#: because it is the one part of *this* export that contains a read-only guard
+#: and a live connection seam: code a model wrote there could weaken both.
+REPOSITORIES_DIR = f"src/{PACKAGE_NAME}/repositories"
+
 #: Files/directories the conversion agent must never touch (restated in
-#: the prompt; the tools are what enforce it).
+#: the prompt; the tools are what enforce it). ``repositories/`` is listed for
+#: the prompt's and the refusal messages' sake only: the real enforcement is
+#: the path guard -- ``FillSession.write_region`` accepts nothing but
+#: ``nodes/<node_id>.py`` -- so this entry can add a clearer message, never a
+#: weaker guard.
 FORBIDDEN_FILES: tuple[str, ...] = ("graph.py", "state.py", "context.py", "pyproject.toml")
-FORBIDDEN_DIRECTORIES: tuple[str, ...] = ("validate",)
+FORBIDDEN_DIRECTORIES: tuple[str, ...] = ("validate", REPOSITORIES_DIR)
 
 #: The state key carrying the value that flows between nodes -- the
 #: LangGraph counterpart of pydantic-graph's ``ctx.inputs``.
@@ -93,6 +103,7 @@ __all__ = [
     "PINNED_LANGCHAIN_CORE_VERSION",
     "PINNED_LANGCHAIN_VERSION",
     "PINNED_LANGGRAPH_VERSION",
+    "REPOSITORIES_DIR",
     "TARGET_LANGGRAPH",
     "TARGET_PYDANTIC_GRAPH",
 ]

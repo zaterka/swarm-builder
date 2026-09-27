@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from swarm_builder import runtime
 from swarm_builder.appconfig import AppConfig, AppModelConfig, save_config
 from swarm_builder.runtime import (
     DRY_RUN_ENV_VARS,
@@ -239,3 +240,31 @@ def test_temporary_secret_env_restores_after_failure(monkeypatch: pytest.MonkeyP
         with temporary_secret_env({"GROQ_API_KEY": "temp"}):
             raise RuntimeError("provider refused the key")
     assert "GROQ_API_KEY" not in os.environ
+
+
+def test_fake_draft_enabled_is_the_one_switch_both_halves_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The drafter and the clarify pass must never disagree about the stub.
+
+    The switch lives here (and not in ``compile/generate.py``) precisely so there
+    is one answer: ``SWARM_FAKE_GENERATE=1`` or dry run turns both the analysis
+    and the draft into deterministic local code, and neither can spend a
+    credential while the other is stubbed.
+    """
+    monkeypatch.setenv("SWARM_WORKSPACE", str(tmp_path / "workspace"))
+    monkeypatch.setenv("SWARM_CONFIG", str(tmp_path / "settings.json"))
+    monkeypatch.delenv("SWARM_FAKE_GENERATE", raising=False)
+    monkeypatch.delenv("SWARM_FAKE_FILL", raising=False)
+    monkeypatch.delenv("SWARM_RUN_TEST_MODEL", raising=False)
+    assert runtime.fake_draft_enabled() is False
+
+    monkeypatch.setenv(runtime.FAKE_DRAFT_ENV_VAR, runtime.FAKE_DRAFT_ENABLED_VALUE)
+    assert runtime.fake_draft_enabled() is True
+
+    monkeypatch.setenv(runtime.FAKE_DRAFT_ENV_VAR, "0")
+    assert runtime.fake_draft_enabled() is False
+
+    monkeypatch.delenv(runtime.FAKE_DRAFT_ENV_VAR)
+    save_config(AppConfig(dry_run=True), tmp_path / "settings.json")
+    assert runtime.fake_draft_enabled() is True

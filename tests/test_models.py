@@ -5,10 +5,16 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from typing import get_args
 
 import pytest
 from pydantic import ValidationError
 
+from swarm_builder.known_models import (
+    THINKING_MODEL_MAX_OUTPUT_TOKENS,
+    default_max_output_tokens,
+    resolve_max_output_tokens,
+)
 from swarm_builder.models import (
     PORT_TYPE_ANNOTATIONS,
     PORT_TYPE_IMPORTS,
@@ -19,11 +25,18 @@ from swarm_builder.models import (
     JoinSpec,
     ModelSelection,
     NodeIo,
+    NodeKind,
+    NosqlSpec,
+    PortType,
     Position,
     ProgrammaticSpec,
+    SeqEdge,
+    SqlSpec,
     StateField,
     SwarmGraph,
     SwarmNode,
+    VectorDocument,
+    VectorSpec,
 )
 
 UPDATED_AT = datetime(2024, 1, 1, tzinfo=UTC)
@@ -344,10 +357,351 @@ class TestJsonRoundTrip:
             "str": "str",
             "list[str]": "list[str]",
             "json": "dict[str, Any]",
+            "list[json]": "list[dict[str, Any]]",
         }
 
     def test_port_type_import_table_matches_annotation_table(self) -> None:
         assert set(PORT_TYPE_IMPORTS) == set(PORT_TYPE_ANNOTATIONS)
         assert PORT_TYPE_IMPORTS["json"] == "from typing import Any"
+        assert PORT_TYPE_IMPORTS["list[json]"] == "from typing import Any"
         assert PORT_TYPE_IMPORTS["str"] is None
         assert PORT_TYPE_IMPORTS["list[str]"] is None
+
+    def test_the_port_tables_cover_every_port_type_member(self) -> None:
+        """Neither table may lag the ``PortType`` literal.
+
+        A missing row is not a type error -- it is a ``KeyError`` (or a silently
+        wrong annotation) inside the emitter, at compile time, for a document
+        that validated. Deriving the expected keys from the literal is what makes
+        this check keep working when a fifth port type is added.
+        """
+        members = set(get_args(PortType))
+        assert members == {"str", "json", "list[str]", "list[json]"}
+        assert set(PORT_TYPE_ANNOTATIONS) == members
+        assert set(PORT_TYPE_IMPORTS) == members
+
+    def test_node_kind_covers_the_three_database_kinds(self) -> None:
+        assert set(get_args(NodeKind)) == {
+            "agent",
+            "programmatic",
+            "decision",
+            "join",
+            "sql",
+            "nosql",
+            "vector",
+        }
+
+
+# ---------------------------------------------------------------------------
+# Database node specs (PLAN-DB-NODES.md §4.1)
+# ---------------------------------------------------------------------------
+
+
+def _sql_node(**overrides: object) -> SwarmNode:
+    """One ``kind="sql"`` node, with the starter's shape."""
+    payload: dict[str, object] = {
+        "id": "orders_db",
+        "kind": "sql",
+        "title": "Orders",
+        "intent": "Read the orders of the named customer.",
+        "position": Position(x=0, y=0),
+        "io": NodeIo(input_type="str", output_type="list[json]"),
+        "sql": SqlSpec(
+            query="SELECT id FROM orders WHERE customer = :input",
+            seed_sql="CREATE TABLE orders (id INTEGER);\n",
+            write=False,
+            note="the example",
+        ),
+    }
+    payload.update(overrides)
+    return SwarmNode(**payload)  # type: ignore[arg-type]
+
+
+def _database_document_fixture() -> SwarmGraph:
+    """A document holding all three new specs, for the round-trip tests.
+
+    Deliberately a real document rather than three isolated models: the
+    acceptance criterion is that a *document* with database nodes round-trips,
+    which is what the frontend and the store do on every save and load.
+    """
+    nosql_node = SwarmNode(
+        id="tickets",
+        kind="nosql",
+        title="Tickets",
+        intent="Find the tickets whose status is the input.",
+        position=Position(x=200, y=0),
+        io=NodeIo(input_type="str", output_type="list[json]"),
+        nosql=NosqlSpec(
+            collection="tickets",
+            operation="find",
+            filter={"status": "$input", "priority": {"$gte": 2}},
+            limit=20,
+            seed=[{"_id": "t-1", "status": "open", "tags": ["auth"]}],
+            note="the example",
+        ),
+    )
+    vector_node = SwarmNode(
+        id="product_docs",
+        kind="vector",
+        title="Product docs",
+        intent="Search the product documentation for the input text.",
+        position=Position(x=400, y=0),
+        io=NodeIo(input_type="str", output_type="list[json]"),
+        vector=VectorSpec(
+            collection="product_docs",
+            top_k=4,
+            min_score=0.25,
+            seed=[
+                VectorDocument(
+                    id="doc-1", text="A blurb.", metadata={"product": "Nimbus Router X1"}
+                )
+            ],
+            note="the example",
+        ),
+    )
+    return SwarmGraph(
+        id="database-graph",
+        name="Database nodes",
+        entry_node_id="orders_db",
+        exit_node_id="product_docs",
+        state_fields=[StateField(name="rows", type="list[json]", default="None")],
+        nodes=[_sql_node(), nosql_node, vector_node],
+        edges=[
+            SeqEdge(kind="seq", id="e1", source="orders_db", target="tickets"),
+            SeqEdge(kind="seq", id="e2", source="tickets", target="product_docs"),
+        ],
+        updated_at=UPDATED_AT,
+    )
+
+
+class TestDatabaseSpecs:
+    def test_all_three_specs_round_trip_losslessly(self) -> None:
+        graph = _database_document_fixture()
+        first_json = graph.model_dump_json(by_alias=True)
+
+        reloaded = SwarmGraph.model_validate(json.loads(first_json))
+        second_json = reloaded.model_dump_json(by_alias=True)
+
+        assert first_json == second_json
+        assert [node.kind for node in reloaded.nodes] == ["sql", "nosql", "vector"]
+
+    def test_a_database_documents_field_order_is_stable(self) -> None:
+        """``dump -> validate -> dump`` must not reorder anything."""
+        dumped = json.loads(_database_document_fixture().model_dump_json(by_alias=True))
+        assert list(dumped) == [
+            "version",
+            "id",
+            "name",
+            "entryNodeId",
+            "exitNodeId",
+            "stateFields",
+            "nodes",
+            "edges",
+            "model",
+            "updatedAt",
+        ]
+        assert list(dumped["nodes"][0]) == [
+            "id",
+            "kind",
+            "title",
+            "intent",
+            "position",
+            "template",
+            "io",
+            "reads",
+            "writes",
+            "agent",
+            "programmatic",
+            "decision",
+            "join",
+            "sql",
+            "nosql",
+            "vector",
+        ]
+        assert list(dumped["nodes"][0]["sql"]) == ["query", "seedSql", "write", "note"]
+        assert list(dumped["nodes"][1]["nosql"]) == [
+            "collection",
+            "operation",
+            "filter",
+            "limit",
+            "seed",
+            "note",
+        ]
+        assert list(dumped["nodes"][2]["vector"]) == [
+            "collection",
+            "topK",
+            "minScore",
+            "seed",
+            "note",
+        ]
+        assert list(dumped["nodes"][2]["vector"]["seed"][0]) == ["id", "text", "metadata"]
+
+    def test_camel_case_aliases_resolve_for_the_database_specs(self) -> None:
+        camel = {
+            "id": "orders_db",
+            "kind": "sql",
+            "title": "Orders",
+            "intent": "Read orders.",
+            "position": {"x": 0, "y": 0},
+            "io": {"inputType": "str", "outputType": "list[json]"},
+            "sql": {"query": "SELECT 1 AS one", "seedSql": "CREATE TABLE t (a);", "note": "n"},
+        }
+        snake = {
+            "id": "orders_db",
+            "kind": "sql",
+            "title": "Orders",
+            "intent": "Read orders.",
+            "position": {"x": 0, "y": 0},
+            "io": {"input_type": "str", "output_type": "list[json]"},
+            "sql": {"query": "SELECT 1 AS one", "seed_sql": "CREATE TABLE t (a);", "note": "n"},
+        }
+        from_camel = SwarmNode.model_validate(camel)
+        from_snake = SwarmNode.model_validate(snake)
+        assert from_camel == from_snake
+        assert from_camel.sql is not None
+        assert from_camel.sql.seed_sql == "CREATE TABLE t (a);"
+        assert from_camel.sql.write is False
+
+        vector = SwarmNode.model_validate(
+            {
+                "id": "product_docs",
+                "kind": "vector",
+                "title": "Docs",
+                "intent": "Search docs.",
+                "position": {"x": 0, "y": 0},
+                "io": {"inputType": "str", "outputType": "list[json]"},
+                "vector": {
+                    "collection": "product_docs",
+                    "topK": 9,
+                    "minScore": 0.5,
+                    "seed": [{"id": "doc-1", "text": "blurb"}],
+                },
+            }
+        )
+        assert vector.vector is not None
+        assert (vector.vector.top_k, vector.vector.min_score) == (9, 0.5)
+        assert vector.vector.seed[0].metadata == {}
+
+    @pytest.mark.parametrize(
+        ("model", "payload"),
+        [
+            (SqlSpec, {"query": "SELECT 1", "seed_sql": "CREATE TABLE t (a);", "writes": True}),
+            (SqlSpec, {"query": "SELECT 1", "seed_sql": "", "seedSql": "CREATE TABLE t (a);"}),
+            (NosqlSpec, {"collection": "tickets", "operation": "find", "limit": 5, "limits": 5}),
+            (NosqlSpec, {"collection": "tickets", "operation": "aggregate"}),
+            (VectorSpec, {"collection": "docs", "top_k": 4, "topK": 4}),
+            (VectorDocument, {"id": "doc-1", "text": "blurb", "payload": {}}),
+        ],
+    )
+    def test_extra_or_unknown_keys_are_forbidden(
+        self, model: type, payload: dict[str, object]
+    ) -> None:
+        """``extra="forbid"`` must hold inside the new specs too.
+
+        A stray key is a typo or a stale frontend build, and the one place a
+        database spec has no other guard is here: a misspelled ``topK`` would
+        otherwise validate and silently keep the default.
+        """
+        with pytest.raises(ValidationError):
+            model.model_validate(payload)
+
+    def test_a_stray_key_on_the_node_itself_is_still_forbidden(self) -> None:
+        payload = json.loads(_database_document_fixture().model_dump_json(by_alias=True))
+        payload["nodes"][0]["database"] = {}
+        with pytest.raises(ValidationError):
+            SwarmGraph.model_validate(payload)
+
+    def test_the_seed_is_required_to_be_explicit_on_a_sql_node(self) -> None:
+        """A missing ``seed_sql`` must be a validation error, not a default.
+
+        The document has to determine the mock: an absent seed would make the
+        mock's contents a compile-time decision instead of the document's.
+        """
+        with pytest.raises(ValidationError, match="seed_sql|seedSql"):
+            SqlSpec.model_validate({"query": "SELECT 1"})
+        with pytest.raises(ValidationError, match="collection"):
+            NosqlSpec.model_validate({})
+        with pytest.raises(ValidationError, match="collection"):
+            VectorSpec.model_validate({})
+
+    def test_the_documented_defaults_are_the_documented_ones(self) -> None:
+        assert SqlSpec(query="SELECT 1", seed_sql="").write is False
+        assert SqlSpec(query="SELECT 1", seed_sql="").note is None
+        nosql = NosqlSpec(collection="tickets")
+        assert (nosql.operation, nosql.filter, nosql.limit, nosql.seed, nosql.note) == (
+            "find",
+            {},
+            20,
+            [],
+            None,
+        )
+        vector = VectorSpec(collection="product_docs")
+        assert (vector.top_k, vector.min_score, vector.seed, vector.note) == (4, 0.0, [], None)
+        assert VectorDocument(id="doc-1", text="blurb").metadata == {}
+
+    def test_a_database_node_needs_no_template_to_validate(self) -> None:
+        """Templates are agent-only, and the schema does not require one here.
+
+        Phase 1 rejects a database node that carries a template; the schema's job
+        is only to make the field optional, which is what lets the document
+        round-trip either way.
+        """
+        assert _sql_node().template is None
+        assert _sql_node(template="chat").template == "chat"
+
+
+# ---------------------------------------------------------------------------
+# default_max_output_tokens (PLAN-ATTACHMENTS-CLARIFY.md, provider testing)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        # Thinking models whose provider default output budget is too small for a
+        # large structured answer: measured at 5135 output tokens for one draft.
+        ("claude-sonnet-5", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        ("anthropic:claude-opus-5", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        ("us.anthropic.claude-sonnet-4-6", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        ("EU.ANTHROPIC.CLAUDE-HAIKU-4-5", THINKING_MODEL_MAX_OUTPUT_TOKENS),
+        # Every other family now gets an explicit budget too -- leaving the
+        # provider default in place was the too-small value this bug reported.
+        ("deepseek-flash", 8192),
+        ("deepseek-v4.1-flash", 8192),
+        ("gpt-5.6-sol", 32768),
+        ("gemini-2.5-flash", 32768),
+        ("groq:llama-3.3-70b", 16384),
+        # Unknown/custom endpoints get the conservative floor rather than None.
+        ("", 16384),
+        ("custom:some-proxy-model", 16384),
+    ],
+)
+def test_default_max_output_tokens_only_overrides_where_it_must(
+    model: str, expected: int | None
+) -> None:
+    assert default_max_output_tokens(model) == expected
+
+
+def test_resolve_max_output_tokens_prefers_the_user_override() -> None:
+    """A saved Max output tokens setting outranks the family default."""
+    assert resolve_max_output_tokens("gpt-5", None) == 32768
+    assert resolve_max_output_tokens("gpt-5", 5000) == 5000
+    assert resolve_max_output_tokens("deepseek-v4-flash", 123456) == 123456
+
+
+def test_the_agents_carry_the_budget_when_one_is_given() -> None:
+    """The value has to reach ``Agent(model_settings=...)``, not just the route."""
+    from swarm_builder.compile import clarify as clarify_module
+    from swarm_builder.compile import generate as generate_module
+
+    draft_agent = generate_module.build_generate_agent("test:model", max_output_tokens=16384)
+    clarify_agent = clarify_module.build_clarify_agent("test:model", max_output_tokens=16384)
+    assert draft_agent.model_settings["max_tokens"] == 16384
+    assert clarify_agent.model_settings["max_tokens"] == 16384
+
+    # And an unset budget leaves the provider default alone.
+    default_draft = generate_module.build_generate_agent("test:model")
+    default_clarify = clarify_module.build_clarify_agent("test:model")
+    # `None` here means "no explicit settings", i.e. the provider default stands.
+    assert (default_draft.model_settings or {}).get("max_tokens") is None
+    assert (default_clarify.model_settings or {}).get("max_tokens") is None

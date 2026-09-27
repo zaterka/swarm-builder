@@ -115,6 +115,37 @@ def test_put_saves_a_model_and_never_returns_the_key(
         assert _SECRET not in client.get(path).text, path
 
 
+def test_max_tokens_round_trips_and_defaults_to_null(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    assert client.get("/api/settings").json()["maxTokensDefault"] > 0
+
+    body = client.put(
+        "/api/settings",
+        json={"model": {"provider": "openai", "model": "gpt-5.4-mini", "maxTokens": 4096}},
+    ).json()
+    assert body["model"]["maxTokens"] == 4096
+
+    # Omitting the field (the form is authoritative on save) clears the override.
+    body = client.put(
+        "/api/settings", json={"model": {"provider": "openai", "model": "gpt-5.4-mini"}}
+    ).json()
+    assert body["model"]["maxTokens"] is None
+
+
+def test_max_tokens_out_of_bounds_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/settings",
+        json={"model": {"provider": "openai", "model": "gpt-5.4-mini", "maxTokens": 100}},
+    )
+    assert response.status_code == 422
+    assert "max output tokens" in str(response.json()["detail"]).lower()
+
+
 def test_no_endpoint_returns_the_stored_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

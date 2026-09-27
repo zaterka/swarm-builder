@@ -17,6 +17,11 @@
   --sb-programmatic: #5f7436;
   --sb-decision: #9c5f33;
   --sb-join: #6f4894;
+  /* The three database kinds. Chosen to stay distinguishable from the four
+     above at a glance: teal for sql, slate for nosql, berry for vector. */
+  --sb-sql: #2c6e6a;
+  --sb-nosql: #4c6373;
+  --sb-vector: #9c3f6d;
   --sb-delegate: #8d887e;
   --sb-font-hand: 'Bradley Hand', 'Chalkboard SE', 'Segoe Print', 'Comic Sans MS', cursive;
 }
@@ -73,6 +78,23 @@
   border-width: 3px;
   border-style: double;
 }
+/* The three database kinds share one card shape (two square corners, one
+   clipped: a "record" rather than a process) and differ only by colour -- the
+   badge and the operation line are what tell them apart. */
+.sb-node-sketch.sb-kind-sql,
+.sb-node-sketch.sb-kind-nosql,
+.sb-node-sketch.sb-kind-vector {
+  border-radius: 4px 4px 14px 4px;
+}
+.sb-node-sketch.sb-kind-sql {
+  border-color: var(--sb-sql);
+}
+.sb-node-sketch.sb-kind-nosql {
+  border-color: var(--sb-nosql);
+}
+.sb-node-sketch.sb-kind-vector {
+  border-color: var(--sb-vector);
+}
 
 .sb-node-badge {
   display: inline-block;
@@ -88,6 +110,9 @@
 .sb-kind-programmatic .sb-node-badge { background: var(--sb-programmatic); }
 .sb-kind-decision .sb-node-badge { background: var(--sb-decision); }
 .sb-kind-join .sb-node-badge { background: var(--sb-join); }
+.sb-kind-sql .sb-node-badge { background: var(--sb-sql); }
+.sb-kind-nosql .sb-node-badge { background: var(--sb-nosql); }
+.sb-kind-vector .sb-node-badge { background: var(--sb-vector); }
 
 .sb-node-corner-tag {
   position: absolute;
@@ -121,6 +146,21 @@
   white-space: nowrap;
 }
 
+/* The database node's operation line: monospace, because it is the one part of
+   a database card that is literal source (a SQL statement, a collection name,
+   a top_k) rather than prose. */
+.sb-node-db-op {
+  margin-top: 4px;
+  font-family: var(--sb-font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  color: #55514a;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Handles read as pen-drawn ports rather than default blue dots, and
    grow on hover so they stay easy to grab at the same hit area. */
 .react-flow__handle {
@@ -146,6 +186,19 @@
   stroke: var(--sb-delegate);
   stroke-width: 2;
   stroke-dasharray: 6 4;
+}
+
+/* A selected edge is how the user reaches the reconnect handles: brighten it
+   (React Flow toggles `selected` on the edge group when `onEdgesChange`
+   routes the selection), so the edge is discoverable and its end-handles are
+   obvious targets for drag-to-reconnect. */
+.react-flow__edge.selected .sb-edge-seq path,
+.react-flow__edge.selected .sb-edge-branch path,
+.react-flow__edge.selected .sb-edge-fanout path,
+.react-flow__edge.selected .sb-edge-join path,
+.react-flow__edge.selected .sb-edge-delegate path {
+  stroke-width: 3.5;
+  filter: drop-shadow(0 0 2px rgba(51, 49, 44, 0.5));
 }
 
 .sb-edge-label {

@@ -8,16 +8,19 @@ import {
   type Node,
   type Edge,
   type NodeChange,
+  type EdgeChange,
   type Connection,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useGraphStore } from '../state/graphStore';
-import type { NodeKind, SwarmNode } from '../api/schema';
+import { useGraphStore, starterPatch } from '../state/graphStore';
+import { isDatabaseKind, isNodeKind, type NodeKind, type SwarmNode } from '../api/schema';
 import AgentNode from './nodes/AgentNode';
 import ProgrammaticNode from './nodes/ProgrammaticNode';
 import DecisionNode from './nodes/DecisionNode';
 import JoinNode from './nodes/JoinNode';
+import DatabaseNode from './nodes/DatabaseNode';
 import type { SwarmNodeData } from './nodes/AgentNode';
+import { KIND_LABELS } from '../panels/Palette';
 import { edgeTypes } from './edges';
 import { deriveRunDisplayStatuses } from '../state/runState';
 import './theme.css';
@@ -27,6 +30,11 @@ const nodeTypes = {
   programmatic: ProgrammaticNode,
   decision: DecisionNode,
   join: JoinNode,
+  // One component for all three database kinds (see DatabaseNode.tsx) -- the
+  // badge is what distinguishes them, not the card.
+  sql: DatabaseNode,
+  nosql: DatabaseNode,
+  vector: DatabaseNode,
 };
 
 interface PendingConnection {
@@ -59,6 +67,8 @@ export function Canvas() {
   const addEdge = useGraphStore((s) => s.addEdge);
   const addNode = useGraphStore((s) => s.addNode);
   const addDecisionBranch = useGraphStore((s) => s.addDecisionBranch);
+  const removeEdge = useGraphStore((s) => s.removeEdge);
+  const reconnectEdge = useGraphStore((s) => s.reconnectEdge);
   const { screenToFlowPosition } = useReactFlow();
   const paneRef = useRef<HTMLDivElement>(null);
 
@@ -117,6 +127,35 @@ export function Canvas() {
     [updateNodePosition, removeNode],
   );
 
+  // React Flow emits edge removal on Delete/Backspace (keyboard deletion) and
+  // selection changes as the user clicks an edge. Both must write back to the
+  // store: edges are a controlled projection, so without this handler the
+  // Delete key is a silent no-op for edges.
+  const onEdgesChange = useCallback(
+    (changes: EdgeChange[]) => {
+      for (const change of changes) {
+        if (change.type === 'remove') {
+          removeEdge(change.id);
+        } else if (change.type === 'select') {
+          selectEdge(change.selected ? change.id : null);
+        }
+      }
+    },
+    [removeEdge, selectEdge],
+  );
+
+  // Drag an existing edge's source/target handle onto another node. The store
+  // keeps the edge kind and its paired spec fields in sync, and refuses (by
+  // returning false and leaving the store untouched) when the move would break
+  // a kind constraint -- React Flow then snaps the edge back.
+  const onReconnect = useCallback(
+    (oldEdge: Edge, newConnection: Connection) => {
+      if (!newConnection.source || !newConnection.target) return;
+      reconnectEdge(oldEdge.id, newConnection.source, newConnection.target);
+    },
+    [reconnectEdge],
+  );
+
   const onNodeClick = useCallback(
     (_: unknown, node: Node) => {
       selectNode(node.id);
@@ -148,10 +187,24 @@ export function Canvas() {
   const onDrop = useCallback(
     (event: React.DragEvent) => {
       event.preventDefault();
-      const kind = event.dataTransfer.getData('application/swarm-builder-node-kind') as NodeKind;
-      if (!kind) return;
+      const raw = event.dataTransfer.getData('application/swarm-builder-node-kind');
+      // `dataTransfer` is caller-supplied, so the value is checked rather than
+      // cast: an unknown kind would otherwise reach `addNode` and there fall
+      // through every `case`, producing a node with no spec at all.
+      if (!isNodeKind(raw)) return;
+      const kind: NodeKind = raw;
       const position = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      addNode(kind, kind.charAt(0).toUpperCase() + kind.slice(1), position);
+      if (isDatabaseKind(kind)) {
+        // A dropped database node is created exactly like a clicked one: from
+        // the cached starter (spec *and* io), or not at all. The palette
+        // disables these entries when the catalog is unavailable, so this is
+        // the same rule reached by the other door.
+        const patch = starterPatch(kind, useGraphStore.getState().databaseStarters);
+        if (!patch) return;
+        addNode(kind, KIND_LABELS[kind], position, patch);
+        return;
+      }
+      addNode(kind, KIND_LABELS[kind], position);
     },
     [screenToFlowPosition, addNode],
   );
@@ -247,6 +300,10 @@ export function Canvas() {
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
         onNodesChange={onNodesChange}
+        onEdgesChange={onEdgesChange}
+        onReconnect={onReconnect}
+        reconnectRadius={16}
+        deleteKeyCode={['Backspace', 'Delete']}
         onNodeClick={onNodeClick}
         onEdgeClick={onEdgeClick}
         onPaneClick={onPaneClick}

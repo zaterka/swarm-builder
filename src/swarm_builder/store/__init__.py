@@ -7,9 +7,10 @@ because they have different failure surfaces:
   (``<workspace>/graphs/<id>.json``), read/written/validated through
   :class:`swarm_builder.models.SwarmGraph`.
 - :mod:`swarm_builder.store.projects` -- one directory per generated
-  project (``<workspace>/projects/<id>/``), whose *contents* are the
+  project (``<workspace>/projects/<name-slug>/``, claimed via a
+  ``.swarm-project.json`` ownership marker), whose *contents* are the
   scaffolder's job, not this package's -- this package only owns the
-  directory's lifecycle (create/clear/delete).
+  directory's lifecycle (claim/find/rename/clear/delete).
 
 Both modules take an explicit ``workspace_dir: Path`` argument on every
 function rather than calling :func:`swarm_builder.config.get_workspace_dir`

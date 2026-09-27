@@ -77,7 +77,12 @@ from pydantic_ai.models import Model
 from swarm_builder.appconfig import strip_userinfo
 from swarm_builder.compile import ResolvedModel
 from swarm_builder.inherit.settings import EffectiveModel, RouteConfig
-from swarm_builder.known_models import is_known_model_name as known_model_names_installed
+from swarm_builder.known_models import (
+    is_known_model_name as known_model_names_installed,
+)
+from swarm_builder.known_models import (
+    resolve_max_output_tokens,
+)
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -140,6 +145,7 @@ class LiveModel:
     pyproject_extras: tuple[str, ...]
     reasoning_effort: str | None
     source_description: str
+    max_output_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -497,6 +503,9 @@ def build_live_model(effective: EffectiveModel) -> LiveModel:
                 f"{effective.provider} (custom endpoint {emission.base_url}, "
                 f"source={effective.source})"
             ),
+            max_output_tokens=resolve_max_output_tokens(
+                effective.model, effective.max_tokens
+            ),
         )
 
     return LiveModel(
@@ -504,6 +513,9 @@ def build_live_model(effective: EffectiveModel) -> LiveModel:
         pyproject_extras=emission.extras,
         reasoning_effort=effective.reasoning_effort,
         source_description=f"{effective.provider}:{effective.model} (source={effective.source})",
+        max_output_tokens=resolve_max_output_tokens(
+            effective.model, effective.max_tokens
+        ),
     )
 
 

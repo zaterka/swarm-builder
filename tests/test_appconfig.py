@@ -67,6 +67,7 @@ def test_document_shape_is_stable(settings_path: Path) -> None:
         "baseUrl": None,
         "apiKey": None,
         "reasoningEffort": None,
+        "maxTokens": None,
     }
 
 

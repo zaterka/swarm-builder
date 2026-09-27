@@ -37,6 +37,7 @@ from swarm_builder.compile.validate import ValidationResult, run_keyless_gate
 from swarm_builder.inherit.routes import UnmappableRouteError, build_live_model
 from swarm_builder.inherit.settings import EffectiveModel
 from swarm_builder.models import SwarmGraph
+from swarm_builder.store.projects import write_project_marker
 
 #: Signature of the Phase-7 seam (the real agent or the fake).
 Converter = Callable[..., Awaitable[object]]
@@ -130,6 +131,7 @@ async def run_langgraph_phases(
     if project_dir.exists():
         emitters.log(job, f"recompile: clearing existing LangGraph project at {project_dir}")
         _clear_dir(project_dir)
+    write_project_marker(project_dir, graph.id, graph.name)
     try:
         scaffold_result = scaffold_langgraph(graph, project_dir, model_source)
         baseline: ProjectBaseline = capture_baseline(

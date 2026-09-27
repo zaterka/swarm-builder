@@ -16,11 +16,12 @@ from pydantic.alias_generators import to_camel
 
 from swarm_builder.config import get_uv_cache_dir, get_workspace_dir
 from swarm_builder.store._ids import InvalidGraphIdError
+from swarm_builder.store.graphs import GraphNotFoundError, get_graph
 from swarm_builder.store.projects import (
-    langgraph_project_dir,
-    langgraph_project_exists,
-    project_dir,
-    project_exists,
+    langgraph_project_dir_for,
+    project_dir_for,
+    project_dir_name,
+    projects_dir,
 )
 
 router = APIRouter(tags=["export"])
@@ -61,18 +62,18 @@ def export_graph(
 
     try:
         if target == "langgraph":
-            exists = langgraph_project_exists(workspace_dir, graph_id)
-            path = langgraph_project_dir(workspace_dir, graph_id)
+            path = langgraph_project_dir_for(workspace_dir, graph_id)
         else:
-            exists = project_exists(workspace_dir, graph_id)
-            path = project_dir(workspace_dir, graph_id)
+            path = project_dir_for(workspace_dir, graph_id)
     except InvalidGraphIdError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    if not exists:
+    if path is None:
+        expected = _expected_path(workspace_dir, graph_id, target)
         raise HTTPException(
             status_code=404,
-            detail=f"no compiled {target} project for graph {graph_id!r} yet; expected at {path}",
+            detail=f"no compiled {target} project for graph {graph_id!r} yet; "
+            f"expected at {expected}",
         )
 
     uv_cache_dir = get_uv_cache_dir()
@@ -82,3 +83,23 @@ def export_graph(
         f"UV_CACHE_DIR={uv_cache_dir} uv run python validate/dry_run.py"
     )
     return ExportResponse(project_path=str(path), run_command=run_command, target=target)
+
+
+def _expected_path(workspace_dir, graph_id: str, target: str) -> str:
+    """The directory the user would expect to find, for a 404 message.
+
+    Best-effort: the name-slug path when the graph document is available,
+    otherwise the legacy id-keyed path. This is message-only -- resolution
+    already happened and found nothing, so the exact string is a hint, not a
+    guarantee.
+    """
+    root = (
+        projects_dir(workspace_dir)
+        if target != "langgraph"
+        else workspace_dir / "projects-langgraph"
+    )
+    try:
+        graph = get_graph(workspace_dir, graph_id)
+        return str(root / project_dir_name(graph.name, graph.id))
+    except (GraphNotFoundError, InvalidGraphIdError):
+        return str(root / graph_id)

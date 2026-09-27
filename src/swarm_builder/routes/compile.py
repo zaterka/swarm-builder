@@ -59,7 +59,7 @@ from swarm_builder import runtime
 from swarm_builder.config import get_dsh_home, get_workspace_dir
 from swarm_builder.models import SwarmGraph
 from swarm_builder.routes.graphs import _load_graph_or_http_error
-from swarm_builder.store.projects import langgraph_project_dir, project_dir
+from swarm_builder.store.projects import claim_langgraph_project_dir, claim_project_dir
 
 if TYPE_CHECKING:
     # Annotations only. The runtime import of the compile subsystem is
@@ -206,7 +206,7 @@ class StartCompileRequest(_CamelModel):
     ``target`` selects the export: ``pydantic-graph`` (default, the five
     phases) or ``langgraph`` (the five phases, then a conversion of the
     validated project into a LangGraph export under
-    ``workspace/projects-langgraph/<graphId>/``).
+    ``workspace/projects-langgraph/<name-slug>/``).
     """
 
     graph_id: str
@@ -723,17 +723,37 @@ async def _run_job(
         registry.mark_failed(compile_id, _PipelineUnavailableError(str(exc.detail)))
         return
 
-    await run_compile(
-        graph,
-        registry=registry,
-        compile_id=compile_id,
-        project_dir=project_dir(workspace_dir, graph.id),
-        dsh_home=get_dsh_home(),
-        filler=filler,
-        target=target,
-        langgraph_project_dir=langgraph_project_dir(workspace_dir, graph.id),
-        dry_run=dry_run,
-    )
+    try:
+        await run_compile(
+            graph,
+            registry=registry,
+            compile_id=compile_id,
+            project_dir=claim_project_dir(workspace_dir, graph.id, graph.name),
+            dsh_home=get_dsh_home(),
+            filler=filler,
+            target=target,
+            langgraph_project_dir=(
+                claim_langgraph_project_dir(workspace_dir, graph.id, graph.name)
+                if target == "langgraph"
+                else None
+            ),
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        # ``run_compile`` records every *compile* failure on the job itself (a
+        # failed status plus a terminal ``error`` event) and then re-raises.
+        # Nobody awaits this task, so that re-raise surfaced only as asyncio's
+        # "Task exception was never retrieved" traceback on stderr -- noise that
+        # contradicted this function's own promise that a failure reaches the job
+        # instead of escaping as an unhandled task exception. The re-raise is
+        # therefore swallowed here: the job is already terminal for every failure
+        # ``run_compile`` reports, and the ``is_live`` check covers the remaining
+        # case (a failure raised before it could record anything), which is
+        # exactly the "job left queued forever" hazard the docstring names.
+        job = registry.get(compile_id)
+        if job.is_live():
+            registry.mark_failed(compile_id, exc)
+        return
 
 
 @router.get(

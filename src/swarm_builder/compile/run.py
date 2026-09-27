@@ -121,9 +121,9 @@ class ProjectStaleError(RunError):
 def coerce_input(raw: object, port_type: PortType) -> object:
     """Interpret the client's raw input as the entry node's port type.
 
-    A ``str`` port takes any string verbatim. ``json`` and ``list[str]``
-    take either the already-parsed value or a JSON string of it -- the
-    latter because the panel's input box is a text field, and making the
+    A ``str`` port takes any string verbatim. ``json``, ``list[str]`` and
+    ``list[json]`` take either the already-parsed value or a JSON string of it --
+    the latter because the panel's input box is a text field, and making the
     client parse JSON before sending would put a second copy of this rule
     in the frontend.
 
@@ -161,6 +161,15 @@ def coerce_input(raw: object, port_type: PortType) -> object:
         if isinstance(value, list) and all(isinstance(item, str) for item in value):
             return value
         raise RunInputError("entry node expects a JSON list of strings")
+
+    if port_type == "list[json]":
+        # A database read's result set, and therefore a port type a graph can
+        # declare as its *entry* port: a list of row objects passes through
+        # unchanged. Coercing it into a dict or a string instead would hand the
+        # first step something its declared input type never promised.
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            return value
+        raise RunInputError("entry node expects a JSON list of objects")
 
     raise RunInputError(f"unsupported entry port type {port_type!r}")
 

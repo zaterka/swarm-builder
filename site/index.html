@@ -29,6 +29,7 @@
     <a href="#how">How it works</a>
     <a href="#example">Example</a>
     <a href="#export">What you export</a>
+    <a href="#deployment">From ideation</a>
     <a href="#compare">Compared</a>
     <a href="#quickstart">Quickstart</a>
     <a class="gh" href="https://github.com/zaterka/swarm-builder">GitHub</a>
@@ -262,6 +263,53 @@ run/
         a compile gates the draft.
       </p>
     </div>
+  </div>
+</section>
+
+<!-- ================================================ IDEATION TO DEPLOYMENT -->
+<section id="deployment" class="deployment">
+  <h2>From ideation to deployment, not a roadmap</h2>
+  <p class="deployment-intro">
+    A whiteboard session usually ends in a plan: a picture of the system, then a list of tickets
+    to turn that picture into software. Swarm Builder ends the session differently. The paragraph
+    you write and the canvas you shape <em>are</em> the build, so you leave holding a functioning
+    application — not a roadmap that promises one a few sprints from now.
+  </p>
+
+  <div class="deployment-grid">
+    <figure class="roadmap" aria-labelledby="roadmap-caption">
+      <figcaption id="roadmap-caption">
+        <span class="path">whiteboard → next-steps.md</span>
+        <span class="note">what an ideation session usually produces</span>
+      </figcaption>
+<pre><code># Turn the whiteboard into software
+- [ ] choose an orchestration framework
+- [ ] scaffold the Python project
+- [ ] implement the classification step
+- [ ] implement the two agents and the join
+- [ ] wire the decision branches
+- [ ] add state and the model seam
+- [ ] write tests and a test-model run
+- [ ] run end to end, then ship</code></pre>
+    </figure>
+
+    <figure class="shipped" aria-labelledby="shipped-caption">
+      <figcaption id="shipped-caption">
+        <span class="path">workspace/projects/support-triage/</span>
+        <span class="note">what the same session produces in Swarm Builder</span>
+      </figcaption>
+<pre><code>$ uv sync
+<span class="out">✓ dependencies resolved and pinned</span>
+
+<span class="out"># keyless run of the exported project</span>
+$ SWARM_RUN_TEST_MODEL=1 uv run python run/stream_run.py input.json
+<span class="out">{"event":"run_started","model":"TestModel","input":"I was double-charged"}</span>
+<span class="out">{"event":"node_finished","nodeId":"classifyticket","output":"billing"}</span>
+<span class="out">{"event":"node_finished","nodeId":"billingagent","output":"Refund policy ..."}</span>
+<span class="out">{"event":"node_finished","nodeId":"mergedrafts","output":["Refund policy ..."]}</span>
+<span class="out">{"event":"node_finished","nodeId":"finalreply","output":"Dear customer ..."}</span>
+<span class="out">{"event":"run_finished","output":"Dear customer ...","durationMs":2741}</span></code></pre>
+    </figure>
   </div>
 </section>
 

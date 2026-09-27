@@ -1,0 +1,291 @@
+"""SQL repositories: a stdlib-SQLite mock and a psycopg 3 live adapter.
+
+Mock is the default and needs nothing installed: the mock seeds an in-memory
+SQLite database from the node's seed file and enforces read-only access with
+``PRAGMA query_only`` plus a SQLite authorizer, not with documentation. Live
+needs ``SWARM_DB_MODE=live``, ``SWARM_SQL_DSN`` and the driver:
+
+```bash
+uv sync --extra live-sql
+```
+
+Two implementations in one module with no ``if mock:`` branch inside either, so
+the mock cannot rot into an approximation of the live path. The live driver is
+imported inside :meth:`PostgresRepository.__init__` -- never at module import
+time -- so ``import <package>.graph`` succeeds with no driver installed.
+"""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+import threading
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any, Protocol
+
+from $package.repositories.portshape import to_psycopg
+
+
+class SqlRepository(Protocol):
+    """The surface a SQL node's step, and any read-only tool built from it, is
+    typed against.
+
+    ``query`` is the only method an agent tool can reach: a tool is emitted
+    against one declared read operation, so no model-authored statement can
+    arrive here at all (there is deliberately no free-form SQL tool).
+    """
+
+    def query(
+        self, sql: str, params: Mapping[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Run one read query and return its rows."""
+        ...
+
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> int:
+        """Run one writing statement and return the rows it affected."""
+        ...
+
+
+#: Statement heads that are reads. ``WITH`` is included because a CTE is a read
+#: -- and because a ``WITH`` *can* hide a write, which is exactly why the
+#: lexical check below is not the guard.
+_READ_STATEMENT_RE = re.compile(r"^(select|with)\b", re.IGNORECASE)
+
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def strip_sql_comments(sql: str) -> str:
+    """Remove ``--`` and ``/* */`` comments from a query.
+
+    The read-only check looks at the statement's *head*, so a comment in front
+    of it must not be able to decide the answer: ``-- pick one\\nDROP TABLE t``
+    is a DROP. Comments inside string literals are stripped as well, which can
+    only make this check more permissive about a read -- never about a write,
+    because the authorizer, not this function, is what refuses writes.
+
+    Comments are stripped *before* :func:`_statements` splits on semicolons:
+    a comment containing an apostrophe would otherwise look like an unterminated
+    string literal and swallow the statement that follows it.
+    """
+    return _BLOCK_COMMENT_RE.sub(" ", _LINE_COMMENT_RE.sub(" ", sql))
+
+
+def _statements(sql: str) -> list[str]:
+    """Split a query on ``;``, ignoring semicolons inside a quoted run.
+
+    A naive ``split(";")`` rejects ``SELECT ';' AS if_a_semicolon`` -- a
+    perfectly ordinary read -- and refusing reads is not what this check is for.
+    Single and double quotes are skipped, including SQL's own doubled-quote
+    escape (``''``).
+
+    Args:
+        sql: A comment-free query (see :func:`strip_sql_comments`).
+
+    Returns:
+        The non-blank statements, in order.
+    """
+    statements: list[str] = []
+    current: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(sql):
+        character = sql[index]
+        if quote:
+            current.append(character)
+            if character == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    current.append(sql[index + 1])
+                    index += 1
+                else:
+                    quote = ""
+        elif character in "'\"":
+            quote = character
+            current.append(character)
+        elif character == ";":
+            statements.append("".join(current))
+            current = []
+        else:
+            current.append(character)
+        index += 1
+    statements.append("".join(current))
+    return [statement for statement in statements if statement.strip()]
+
+
+def assert_read_only(sql: str) -> None:
+    """Reject anything that is not a single ``SELECT``/``WITH`` statement.
+
+    This exists for a *good error message*, not as the guard: SQLite 3.35+
+    accepts ``WITH x AS (SELECT 1) INSERT INTO t ... RETURNING *``, which passes
+    any lexical check at all. The enforcement is the authorizer plus
+    ``PRAGMA query_only`` that :meth:`SqliteRepository.query` arms around the
+    statement; this function's job is to say "that is an INSERT" before SQLite
+    says "not authorized".
+
+    Args:
+        sql: The statement about to be run.
+
+    Raises:
+        ValueError: If the statement is empty, is more than one statement, or
+            does not begin with ``SELECT``/``WITH``.
+    """
+    stripped = strip_sql_comments(sql)
+    if not stripped.strip():
+        raise ValueError("the query is empty")
+    statements = _statements(stripped)
+    if len(statements) != 1:
+        raise ValueError(
+            f"a read query must be exactly one statement, but this is {len(statements)}"
+        )
+    head = statements[0].strip()
+    if not _READ_STATEMENT_RE.match(head):
+        raise ValueError(
+            "a read query must start with SELECT or WITH, but this one starts with "
+            f"{head.split()[0]!r}"
+        )
+
+
+#: One lock for every SQLite mock in this process: the factory hands one
+#: instance to every step that shares a seed, and steps can run concurrently.
+_SQLITE_LOCK = threading.Lock()
+
+#: Authorizer actions that cannot write. ``SQLITE_FUNCTION`` and
+#: ``SQLITE_RECURSIVE`` are in this list because they are *reads*: SQLite
+#: reports every builtin -- ``count``, ``lower``, and even the ``LIKE`` operator
+#: -- as a function call, and a recursive CTE as ``SQLITE_RECURSIVE``, so
+#: denying them would make this mock refuse ordinary read queries
+#: (``WHERE name LIKE '%x%'``, ``SELECT count(*)``) that the live database
+#: answers happily. Neither can write: this connection registers no user
+#: functions, and every writing statement needs its own INSERT/UPDATE/DELETE/DDL
+#: action, which is denied here (with ``PRAGMA query_only`` as a second layer).
+_READ_ACTIONS = (
+    sqlite3.SQLITE_SELECT,
+    sqlite3.SQLITE_READ,
+    sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_RECURSIVE,
+)
+
+
+def _read_only_authorizer(action: int, *_args: object) -> int:
+    """Allow the read actions above; deny every other SQLite action."""
+    if action in _READ_ACTIONS:
+        return sqlite3.SQLITE_OK
+    return sqlite3.SQLITE_DENY
+
+
+def _bind_params(params: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    """sqlite3 takes a mapping for ``:name`` placeholders.
+
+    ``None`` and ``{}`` are equivalent for a query with no placeholders; a
+    stray *extra* key is rejected by sqlite3 itself, which is the behaviour we
+    want (an unbound parameter is a defect, not something to paper over).
+    """
+    return {} if params is None else params
+
+
+class SqliteRepository:
+    """The mock: an in-memory SQLite database seeded from ``seed_path``.
+
+    The seed's DDL and rows are applied once, *before* the read-only guard is
+    armed: seed SQL legitimately writes. Everything the graph issues afterwards
+    goes through :meth:`query` (guarded) or :meth:`execute` (the explicitly
+    declared write path).
+    """
+
+    def __init__(self, seed_path: Path) -> None:
+        self.seed_path = Path(seed_path)
+        self.seed_text = self.seed_path.read_text(encoding="utf-8")
+        self._connection = sqlite3.connect(":memory:", check_same_thread=False)
+        # `executescript` cannot run under the authorizer -- it issues CREATEs
+        # and INSERTs of its own -- so the guard is armed per query, below.
+        self._connection.executescript(self.seed_text)
+        self._connection.commit()
+
+    def query(
+        self, sql: str, params: Mapping[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Run one read query and return its rows as dicts.
+
+        Column names come from ``cursor.description`` in the query's own order,
+        not from the table definition: ``SELECT o.total, c.name`` produces keys
+        in that order, and a computed column keeps whatever alias the query gave
+        it.
+        """
+        assert_read_only(sql)
+        with _SQLITE_LOCK:
+            self._connection.execute("PRAGMA query_only = ON")
+            self._connection.set_authorizer(_read_only_authorizer)
+            try:
+                cursor = self._connection.execute(sql, _bind_params(params))
+                rows = cursor.fetchall()
+                columns = [column[0] for column in cursor.description or ()]
+            finally:
+                # Unarm in this order: a denied PRAGMA would mask the real error.
+                self._connection.set_authorizer(None)
+                self._connection.execute("PRAGMA query_only = OFF")
+        return [dict(zip(columns, row)) for row in rows]
+
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> int:
+        """Run one writing statement, returning the number of rows it affected.
+
+        Deliberately unguarded, and deliberately unreachable from an agent
+        tool: a node only calls this because its Inspector spec says
+        ``write: true``. A write nobody declared is precisely what the read
+        guard exists to prevent, so this is the one method that must never be
+        reached by guessing from a query string.
+        """
+        with _SQLITE_LOCK:
+            cursor = self._connection.execute(sql, _bind_params(params))
+            self._connection.commit()
+        return cursor.rowcount
+
+
+def _live_params(params: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """psycopg binds a mapping to ``%(name)s`` and a sequence to ``%s``."""
+    if params is None or isinstance(params, Mapping):
+        return params
+    return tuple(params)
+
+
+class PostgresRepository:
+    """The live adapter: psycopg 3 over ``SWARM_SQL_DSN``.
+
+    Reuses :func:`assert_read_only` for the error message and runs every read in
+    an explicitly read-only transaction, so a statement that slipped past the
+    lexical check still cannot write. ``execute`` is the declared write path and
+    is not read-only, exactly like the mock's.
+    """
+
+    def __init__(self, dsn: str) -> None:
+        # Lazy, and the only place the driver is touched. `psycopg` is an
+        # optional extra (`uv sync --extra live-sql`), so importing it at module
+        # import time would break the keyless gate:
+        # `import <package>.graph` must succeed with nothing installed.
+        try:
+            import psycopg
+        except ImportError as exc:  # pragma: no cover - the gate never gets here
+            raise RuntimeError(
+                "the live SQL adapter needs the psycopg driver: install it with "
+                "`uv sync --extra live-sql` and set SWARM_SQL_DSN"
+            ) from exc
+        self._connection = psycopg.connect(dsn)
+        self._connection.autocommit = True
+
+    def query(
+        self, sql: str, params: Mapping[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Run one read query in a read-only transaction."""
+        assert_read_only(sql)
+        with self._connection.transaction():
+            # Defence in depth: the transaction itself refuses a write.
+            self._connection.execute("SET TRANSACTION READ ONLY")
+            cursor = self._connection.execute(to_psycopg(sql), _live_params(params))
+            rows = cursor.fetchall()
+            columns = [column.name for column in cursor.description or ()]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def execute(self, sql: str, params: Mapping[str, Any] | None = None) -> int:
+        """Run one writing statement and return the rows it affected."""
+        cursor = self._connection.execute(to_psycopg(sql), _live_params(params))
+        return cursor.rowcount

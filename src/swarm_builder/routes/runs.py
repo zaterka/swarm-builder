@@ -37,7 +37,7 @@ from swarm_builder.routes.compile import (
 )
 from swarm_builder.routes.graphs import _load_graph_or_http_error
 from swarm_builder.store._ids import InvalidGraphIdError
-from swarm_builder.store.projects import project_dir
+from swarm_builder.store.projects import claim_project_dir, project_dir_for
 from swarm_builder.store.runs import (
     NodeRunRecord,
     RunRecord,
@@ -126,14 +126,20 @@ async def start_run(graph_id: str, body: StartRunRequest) -> StartRunResponse:
     except run_module.RunInputError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    target_dir = project_dir(workspace_dir, graph.id)
-    stale = run_module.project_is_stale(target_dir, graph)
+    target_dir = project_dir_for(workspace_dir, graph.id)
+    stale = target_dir is None or run_module.project_is_stale(target_dir, graph)
     if stale and not body.compile_if_stale:
         raise HTTPException(
             status_code=409,
             detail="the compiled project is missing or older than the graph; compile first "
             "or set compileIfStale",
         )
+    if stale and target_dir is None:
+        # The caller asked to compile first, so claim the name-keyed directory
+        # the compile will scaffold into. Claimed now so the run task and the
+        # compile it performs agree on one concrete path.
+        target_dir = claim_project_dir(workspace_dir, graph.id, graph.name)
+    assert target_dir is not None  # stale=False implies a directory was found
 
     # Lazy degradation seam -- see the module docstring.
     from swarm_builder.compile.jobs import GraphCompileInProgressError

@@ -174,6 +174,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/database-starters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Database Starters
+         * @description Return one starter entry per database kind, in catalog order.
+         *
+         *     Raises:
+         *         fastapi.HTTPException: 503 if the database starter catalog cannot be
+         *             read, so one broken subsystem fails this route rather than server
+         *             startup.
+         */
+        get: operations["list_database_starters_api_database_starters_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/models": {
         parameters: {
             query?: never;
@@ -467,6 +492,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/graphs/generate/clarify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Clarify Graph Route
+         * @description Decide whether ``body.description`` needs questions before drafting.
+         *
+         *     Raises:
+         *         HTTPException: 422 when an attachment id is unknown or expired; 502/503
+         *             for model setup and upstream failures, mirroring ``/generate``.
+         */
+        post: operations["clarify_graph_route_api_graphs_generate_clarify_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/graphs/generate": {
         parameters: {
             query?: never;
@@ -482,12 +531,61 @@ export interface paths {
          *
          *     Raises:
          *         HTTPException: 422 when every attempt failed (the detail carries the
-         *             last review findings as ``problems``); 503 when the resolved
+         *             last review findings as ``problems``) or an attachment expired; 413
+         *             when the attachments exceed the size cap; 503 when the resolved
          *             route is unmappable, no model is configured, or the generator
          *             cannot be imported; 500 when the graph cannot be saved.
          */
         post: operations["generate_graph_route_api_graphs_generate_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graphs/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload Attachment Route
+         * @description Store one uploaded file and return its id and a preview of what was read.
+         *
+         *     Raises:
+         *         HTTPException: 413 for an oversized body, 415 for an unsupported type,
+         *             422 for an unreadable file or an image under a non-vision model, 503
+         *             when the parsers are missing or no model is configured (images only).
+         */
+        post: operations["upload_attachment_route_api_graphs_attachments_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/graphs/attachments/{attachmentId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Attachment Route
+         * @description Discard one attachment (idempotent for the caller, 404 when unknown).
+         *
+         *     Raises:
+         *         HTTPException: 404 when the id is malformed, unknown, or already gone.
+         */
+        delete: operations["delete_attachment_route_api_graphs_attachments__attachmentId__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -519,6 +617,77 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
+        /** AttachmentDeleteResponse */
+        AttachmentDeleteResponse: {
+            /** Attachmentid */
+            attachmentId: string;
+            /** Deleted */
+            deleted: boolean;
+        };
+        /**
+         * AttachmentOut
+         * @description One attachment, as the panel needs it.
+         */
+        AttachmentOut: {
+            /** Id */
+            id: string;
+            /** Filename */
+            filename: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "csv" | "xlsx" | "pptx" | "image";
+            /** Mediatype */
+            mediaType: string;
+            /** Bytes */
+            bytes: number;
+            /** Chars */
+            chars: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Notes */
+            notes: string[];
+            /** Preview */
+            preview: string;
+            /**
+             * Expiresat
+             * Format: date-time
+             */
+            expiresAt: string;
+        };
+        /**
+         * AttachmentSummaryOut
+         * @description One attachment as it was used by a generation.
+         */
+        AttachmentSummaryOut: {
+            /** Id */
+            id: string;
+            /** Filename */
+            filename: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "csv" | "xlsx" | "pptx" | "image";
+            /** Chars */
+            chars: number;
+            /** Truncated */
+            truncated: boolean;
+            /** Notes */
+            notes: string[];
+        };
+        /** AttachmentUploadResponse */
+        AttachmentUploadResponse: {
+            attachment: components["schemas"]["AttachmentOut"];
+            /** Warnings */
+            warnings: string[];
+        };
+        /** Body_upload_attachment_route_api_graphs_attachments_post */
+        Body_upload_attachment_route_api_graphs_attachments_post: {
+            /** File */
+            file: string;
+        };
         /**
          * BranchEdge
          * @description One arm of a decision's dispatch, drawn on the canvas from the
@@ -539,6 +708,65 @@ export interface components {
             target: string;
             /** Match */
             match: string;
+        };
+        /**
+         * ClarifyAnswerInRaw
+         * @description One answer from the panel.
+         */
+        ClarifyAnswerInRaw: {
+            /** Questionid */
+            questionId: string;
+            /** Question */
+            question?: string | null;
+            /** Answer */
+            answer: string;
+        };
+        /** ClarifyOptionOut */
+        ClarifyOptionOut: {
+            /** Label */
+            label: string;
+            /** Description */
+            description?: string | null;
+        };
+        /** ClarifyQuestionOut */
+        ClarifyQuestionOut: {
+            /** Id */
+            id: string;
+            /** Question */
+            question: string;
+            /** Why */
+            why: string;
+            /** Options */
+            options: components["schemas"]["ClarifyOptionOut"][];
+            /** Recommended */
+            recommended: string;
+        };
+        /**
+         * ClarifyRequest
+         * @description Body of ``POST /api/graphs/generate/clarify``.
+         *
+         *     No ``modelOverride``: the analysis pass uses the same resolved route as the
+         *     draft, so model selection happens in exactly one place for this flow.
+         */
+        ClarifyRequest: {
+            /** Description */
+            description: string;
+            /** Attachmentids */
+            attachmentIds?: string[];
+        };
+        /** ClarifyResponse */
+        ClarifyResponse: {
+            /** Needsclarification */
+            needsClarification: boolean;
+            /** Questions */
+            questions: components["schemas"]["ClarifyQuestionOut"][];
+            /** Assumptions */
+            assumptions: string[];
+            /** Understanding */
+            understanding: string;
+            model: components["schemas"]["GenerateModelOut"];
+            /** Dryrun */
+            dryRun: boolean;
         };
         /**
          * CompileSnapshotResponse
@@ -579,6 +807,43 @@ export interface components {
             } | null;
             /** Error */
             error: string | null;
+        };
+        /**
+         * DatabaseStarterOut
+         * @description One database kind's picker-facing entry.
+         *
+         *     ``spec`` and ``io`` are the whole reason this route exists: a new node
+         *     copies both into the graph document, so the document is self-contained
+         *     and the Inspector shows what will actually run (nothing is substituted at
+         *     scaffold time). ``spec`` is the union of the three spec models, and it is
+         *     the kind's *validated* model on the server side -- a malformed
+         *     ``starter.json`` fails while the catalog is being read, never inside a
+         *     generated project.
+         *
+         *     The scaffolding-only fields of the catalog entry (``package_module``,
+         *     ``live_extra_deps``, ``manifest``) are deliberately not exposed:
+         *     ``liveExtra`` names the extra a user must install and ``envVars`` lists
+         *     the variables the live engine reads, which is everything the canvas can
+         *     honestly tell a user. ``SWARM_DB_MODE`` is app-wide rather than an
+         *     engine's, so it is not part of any entry's ``envVars``.
+         */
+        DatabaseStarterOut: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "sql" | "nosql" | "vector";
+            /** Label */
+            label: string;
+            /** Description */
+            description: string;
+            /** Spec */
+            spec: components["schemas"]["SqlSpec"] | components["schemas"]["NosqlSpec"] | components["schemas"]["VectorSpec"];
+            io: components["schemas"]["NodeIo"];
+            /** Liveextra */
+            liveExtra: string;
+            /** Envvars */
+            envVars: string[];
         };
         /**
          * DecisionBranch
@@ -726,6 +991,16 @@ export interface components {
              */
             graphId?: string | null;
             modelOverride?: components["schemas"]["ModelSelection"] | null;
+            /**
+             * Attachmentids
+             * @description Ids returned by POST /api/graphs/attachments. The count and total-size caps are enforced by the store, which reports them as a 413 with code attachment_too_large -- not as a schema-validation error.
+             */
+            attachmentIds?: string[];
+            /**
+             * Answers
+             * @description Answers to the clarify pass' questions; authoritative for the draft.
+             */
+            answers?: components["schemas"]["ClarifyAnswerInRaw"][];
         };
         /** GenerateGraphResponse */
         GenerateGraphResponse: {
@@ -737,6 +1012,8 @@ export interface components {
             model: components["schemas"]["GenerateModelOut"];
             /** Dryrun */
             dryRun: boolean;
+            /** Attachments */
+            attachments?: components["schemas"]["AttachmentSummaryOut"][];
         };
         /** GenerateModelOut */
         GenerateModelOut: {
@@ -907,6 +1184,8 @@ export interface components {
             clearApiKey?: boolean | null;
             /** Reasoningeffort */
             reasoningEffort?: string | null;
+            /** Maxtokens */
+            maxTokens?: number | null;
         };
         /**
          * ModelSelection
@@ -957,12 +1236,12 @@ export interface components {
              * Inputtype
              * @enum {string}
              */
-            inputType: "str" | "json" | "list[str]";
+            inputType: "str" | "json" | "list[str]" | "list[json]";
             /**
              * Outputtype
              * @enum {string}
              */
-            outputType: "str" | "json" | "list[str]";
+            outputType: "str" | "json" | "list[str]" | "list[json]";
         };
         /**
          * NodeRunRecord
@@ -983,6 +1262,42 @@ export interface components {
             error?: string | null;
             /** Durationms */
             durationMs?: number | null;
+        };
+        /**
+         * NosqlSpec
+         * @description Present on ``kind="nosql"`` nodes: one collection, one operation.
+         *
+         *     ``filter`` values may be the sentinel string ``"$input"``, which the
+         *     emitter replaces with the upstream node's value -- so the document can
+         *     say "match the field the user's input names" without carrying any
+         *     expression language into a JSON document. ``limit`` is a warning
+         *     threshold rather than a hard rule (``<= 0`` reads as "unbounded"), so a
+         *     deliberate full scan stays expressible.
+         */
+        NosqlSpec: {
+            /** Collection */
+            collection: string;
+            /**
+             * Operation
+             * @default find
+             * @enum {string}
+             */
+            operation: "find" | "find_one" | "count" | "insert_one";
+            /** Filter */
+            filter?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Limit
+             * @default 20
+             */
+            limit: number;
+            /** Seed */
+            seed?: {
+                [key: string]: unknown;
+            }[];
+            /** Note */
+            note?: string | null;
         };
         /**
          * Position
@@ -1165,6 +1480,8 @@ export interface components {
             baseUrl: string | null;
             /** Reasoningeffort */
             reasoningEffort: string | null;
+            /** Maxtokens */
+            maxTokens: number | null;
             /** Hasapikey */
             hasApiKey: boolean;
             /** Apikeyhint */
@@ -1208,6 +1525,8 @@ export interface components {
             /** Providers */
             providers: components["schemas"]["ProviderOut"][];
             resolvedDefault: components["schemas"]["ResolvedDefaultOut"];
+            /** Maxtokensdefault */
+            maxTokensDefault: number;
             /** Inheritedroutes */
             inheritedRoutes: number;
             /** Workspacewritable */
@@ -1230,13 +1549,41 @@ export interface components {
             clearModel?: boolean | null;
         };
         /**
+         * SqlSpec
+         * @description Present on ``kind="sql"`` nodes. ``query`` uses ``:name`` placeholders
+         *     (``sqlite3``'s native form -- the live adapter rewrites them for the
+         *     driver, and one declaration syntax keeps the Inspector honest about
+         *     which parameters the query actually binds).
+         *
+         *     The split between ``query`` and ``seed_sql`` is deliberate: a node's
+         *     declared operation is what the step and any agent tool run, while the
+         *     seed is the mock's schema *and* rows. ``write`` is a declaration, not a
+         *     hint -- it selects the emitted call (``execute()`` instead of
+         *     ``query()``) and disqualifies the node as an agent tool, because a
+         *     write reachable from a model's tool call is exactly the injection
+         *     surface this design refuses to create.
+         */
+        SqlSpec: {
+            /** Query */
+            query: string;
+            /** Seedsql */
+            seedSql: string;
+            /**
+             * Write
+             * @default false
+             */
+            write: boolean;
+            /** Note */
+            note?: string | null;
+        };
+        /**
          * StartCompileRequest
          * @description Body of ``POST /api/compile``.
          *
          *     ``target`` selects the export: ``pydantic-graph`` (default, the five
          *     phases) or ``langgraph`` (the five phases, then a conversion of the
          *     validated project into a LangGraph export under
-         *     ``workspace/projects-langgraph/<graphId>/``).
+         *     ``workspace/projects-langgraph/<name-slug>/``).
          */
         StartCompileRequest: {
             /** Graphid */
@@ -1305,7 +1652,7 @@ export interface components {
              * Type
              * @enum {string}
              */
-            type: "str" | "json" | "list[str]";
+            type: "str" | "json" | "list[str]" | "list[json]";
             /** Default */
             default?: string | null;
             /** Description */
@@ -1359,10 +1706,14 @@ export interface components {
          *     the title-to-id mapping must stay stable across recompiles or a
          *     recompile would rename step modules instead of updating them.
          *
-         *     Exactly one of ``agent`` / ``programmatic`` / ``decision`` / ``join``
-         *     is expected to be set, matching ``kind`` -- enforced by Phase 1
-         *     (``review.py``), not here, since that cross-field rule belongs with the
-         *     rest of the structural graph validation.
+         *     Exactly one of ``agent`` / ``programmatic`` / ``decision`` / ``join`` /
+         *     ``sql`` / ``nosql`` / ``vector`` is expected to be set, matching
+         *     ``kind`` -- enforced by Phase 1 (``review.py``), not here, since that
+         *     cross-field rule belongs with the rest of the structural graph
+         *     validation. A database node's ``io`` pair is likewise fixed by its
+         *     kind (``str -> list[json]``), and it never carries a ``template``:
+         *     templates are agent-only, and a stale value there would be silently
+         *     ignored.
          */
         SwarmNode: {
             /** Id */
@@ -1371,7 +1722,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "agent" | "programmatic" | "decision" | "join";
+            kind: "agent" | "programmatic" | "decision" | "join" | "sql" | "nosql" | "vector";
             /** Title */
             title: string;
             /** Intent */
@@ -1388,6 +1739,9 @@ export interface components {
             programmatic?: components["schemas"]["ProgrammaticSpec"] | null;
             decision?: components["schemas"]["DecisionSpec"] | null;
             join?: components["schemas"]["JoinSpec"] | null;
+            sql?: components["schemas"]["SqlSpec"] | null;
+            nosql?: components["schemas"]["NosqlSpec"] | null;
+            vector?: components["schemas"]["VectorSpec"] | null;
         };
         /**
          * TemplateEntryOut
@@ -1456,6 +1810,49 @@ export interface components {
             input?: unknown;
             /** Context */
             ctx?: Record<string, never>;
+        };
+        /**
+         * VectorDocument
+         * @description One seeded vector document. ``metadata`` stays a plain dict rather
+         *     than a per-node schema: the mock never filters on it, and a live
+         *     collection's payload shape is the user's business, not the canvas's.
+         */
+        VectorDocument: {
+            /** Id */
+            id: string;
+            /** Text */
+            text: string;
+            /** Metadata */
+            metadata?: {
+                [key: string]: unknown;
+            };
+        };
+        /**
+         * VectorSpec
+         * @description Present on ``kind="vector"`` nodes: a collection and a seed index.
+         *
+         *     ``min_score`` is cosine similarity in ``[-1, 1]``, so its default of
+         *     ``0.0`` means "no threshold" rather than "no weak matches" -- a
+         *     threshold that admitted nothing by default would make a freshly created
+         *     node return an empty list and look broken.
+         */
+        VectorSpec: {
+            /** Collection */
+            collection: string;
+            /**
+             * Topk
+             * @default 4
+             */
+            topK: number;
+            /**
+             * Minscore
+             * @default 0
+             */
+            minScore: number;
+            /** Seed */
+            seed?: components["schemas"]["VectorDocument"][];
+            /** Note */
+            note?: string | null;
         };
     };
     responses: never;
@@ -1652,6 +2049,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TemplateEntryOut"][];
+                };
+            };
+        };
+    };
+    list_database_starters_api_database_starters_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DatabaseStarterOut"][];
                 };
             };
         };
@@ -2128,6 +2545,51 @@ export interface operations {
             };
         };
     };
+    clarify_graph_route_api_graphs_generate_clarify_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClarifyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClarifyResponse"];
+                };
+            };
+            /** @description the description or an attachment is unusable */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the model API refused or failed the request, or answered unusably */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no usable route or credential, or the generator is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     generate_graph_route_api_graphs_generate_post: {
         parameters: {
             query?: never;
@@ -2150,6 +2612,13 @@ export interface operations {
                     "application/json": components["schemas"]["GenerateGraphResponse"];
                 };
             };
+            /** @description the attachments exceed the per-request size cap */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description the model could not produce a review-clean graph */
             422: {
                 headers: {
@@ -2170,6 +2639,96 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    upload_attachment_route_api_graphs_attachments_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_attachment_route_api_graphs_attachments_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentUploadResponse"];
+                };
+            };
+            /** @description the file exceeds the per-file size cap */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the file type is not supported */
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the file could not be read, or the model cannot read images */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the attachment readers are unavailable, or no model is configured */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_attachment_route_api_graphs_attachments__attachmentId__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                attachmentId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentDeleteResponse"];
+                };
+            };
+            /** @description no such attachment */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

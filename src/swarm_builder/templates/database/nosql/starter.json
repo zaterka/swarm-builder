@@ -1,0 +1,47 @@
+{
+  "label": "NoSQL (support tickets)",
+  "description": "Read documents from one collection in mock mode (a dependency-free in-memory document engine seeded from this node's seed) or from a live MongoDB. A filter value of \"$input\" is replaced by the upstream node's value.",
+  "spec": {
+    "collection": "tickets",
+    "operation": "find",
+    "filter": {
+      "status": "$input"
+    },
+    "limit": 20,
+    "seed": [
+      {
+        "_id": "t-1",
+        "status": "open",
+        "subject": "Cannot sign in after the password reset",
+        "priority": 2,
+        "tags": [
+          "auth"
+        ]
+      },
+      {
+        "_id": "t-2",
+        "status": "open",
+        "subject": "Invoice PDF renders blank",
+        "priority": 1,
+        "tags": [
+          "billing"
+        ]
+      },
+      {
+        "_id": "t-3",
+        "status": "closed",
+        "subject": "Export times out for large graphs",
+        "priority": 3,
+        "tags": [
+          "export",
+          "performance"
+        ]
+      }
+    ],
+    "note": "The tickets example: match documents whose status is the incoming value."
+  },
+  "io": {
+    "input_type": "str",
+    "output_type": "list[json]"
+  }
+}

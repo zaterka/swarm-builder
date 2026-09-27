@@ -71,8 +71,16 @@ _INITIAL_FACTORY_BY_REDUCER: dict[str, str] = {
 #: already return a builder object, so the suffix would only add noise.
 _BARE_VARIABLE_KINDS = ("decision", "join")
 
-#: Node kinds emitted as ``builder.step(...)``.
-_STEP_KINDS = ("agent", "programmatic")
+#: Node kinds emitted as ``builder.step(...)``, and therefore the kinds that
+#: have a ``steps/<id>.py`` module (``scaffold.py`` imports this rather than
+#: repeating the list, so the wiring and the emitted tree cannot disagree).
+#:
+#: The three database kinds belong here and *not* in
+#: :data:`_BARE_VARIABLE_KINDS`: a database node is a real step whose body
+#: ``scaffold.py`` emits deterministically from the node's declared operation,
+#: and leaving it out of this tuple silently produced a ``graph.py`` that never
+#: ran the node at all.
+STEP_KINDS: tuple[str, ...] = ("agent", "programmatic", "sql", "nosql", "vector")
 
 
 def _node_var(node: SwarmNode) -> str:
@@ -173,7 +181,7 @@ def emit_graph(graph: SwarmGraph) -> str:
     step_import_ids = sorted(
         node.id
         for node in graph.nodes
-        if node.kind in _STEP_KINDS and node.id not in structure.delegate_only_node_ids
+        if node.kind in STEP_KINDS and node.id not in structure.delegate_only_node_ids
     )
     for node_id in step_import_ids:
         lines.append(f"from swarm_workflow.steps.{node_id} import {node_id}")
@@ -191,13 +199,13 @@ def emit_graph(graph: SwarmGraph) -> str:
     # Step nodes, canvas order.
     for node in graph.nodes:
         is_step_node = (
-            node.kind in _STEP_KINDS and node.id not in structure.delegate_only_node_ids
+            node.kind in STEP_KINDS and node.id not in structure.delegate_only_node_ids
         )
         if is_step_node:
             var = var_by_id[node.id]
             lines.append(f'{var} = builder.step({node.id}, node_id="{node.id}")')
     if any(
-        node.kind in _STEP_KINDS and node.id not in structure.delegate_only_node_ids
+        node.kind in STEP_KINDS and node.id not in structure.delegate_only_node_ids
         for node in graph.nodes
     ):
         lines.append("")
@@ -284,4 +292,4 @@ def emit_graph(graph: SwarmGraph) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["emit_graph"]
+__all__ = ["STEP_KINDS", "emit_graph"]

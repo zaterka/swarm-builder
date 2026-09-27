@@ -130,6 +130,30 @@ CREDENTIAL_ENV_VARS_TO_STRIP: tuple[str, ...] = (
     "SWARM_API_KEY",
 )
 
+#: Database-node variables stripped from every gate subprocess -- the model
+#: credentials above are stripped for one reason and these for the mirror image
+#: of it. The gate is *always* keyless and in **mock** mode: the emitted
+#: ``validate/dry_run.py`` asserts ``db_mode() == "mock"``, and the emitted
+#: project's mock needs no DSN. A user who exported ``SWARM_DB_MODE=live`` (the
+#: documented way to make the Run button read a real database) must therefore not
+#: be able to fail their own compile, and a pass here must keep proving that the
+#: mock path works with nothing configured. Without this, "go live, then edit the
+#: graph" was impossible: the recompile's own gate failed with
+#: "expects the mock database (mock)".
+#:
+#: Kept explicit rather than derived from the starter catalog so this reads at a
+#: glance; ``tests/test_validate.py`` asserts it covers every variable the
+#: catalog declares, so adding an engine cannot leave one leaking into the gate.
+DATABASE_ENV_VARS_TO_STRIP: tuple[str, ...] = (
+    "SWARM_DB_MODE",
+    "SWARM_SQL_DSN",
+    "SWARM_NOSQL_DSN",
+    "SWARM_NOSQL_COLLECTION",
+    "SWARM_VECTOR_DSN",
+    "SWARM_VECTOR_API_KEY",
+    "SWARM_VECTOR_COLLECTION",
+)
+
 #: Matches the `pydantic-ai-slim[...]` dependency line `scaffold.py`
 #: renders, capturing the bracketed extras list (possibly empty).
 _PYPROJECT_EXTRAS_RE = re.compile(r"pydantic-ai-slim\[(?P<extras>[^\]]*)\]")
@@ -445,13 +469,14 @@ def _tail_lines(text: str, count: int) -> str:
 def _build_subprocess_env(uv_cache_dir: Path) -> dict[str, str]:
     """The environment every ``uv`` invocation in this module runs
     under: an explicit ``UV_CACHE_DIR`` (fact 10 -- ``~/.cache/uv`` is
-    not writable under this project's sandbox) and every ambient
-    credential var stripped, so a pass here actually proves the
-    keyless-gate claim rather than incidentally succeeding because the
-    caller's shell happens to have working credentials exported."""
+    not writable under this project's sandbox), every ambient credential
+    var stripped, and every database variable stripped, so a pass here
+    actually proves the keyless, mock-mode gate claim rather than
+    incidentally succeeding -- or failing -- because of the caller's
+    environment."""
     env = dict(os.environ)
     env["UV_CACHE_DIR"] = str(uv_cache_dir)
-    for var in CREDENTIAL_ENV_VARS_TO_STRIP:
+    for var in (*CREDENTIAL_ENV_VARS_TO_STRIP, *DATABASE_ENV_VARS_TO_STRIP):
         env.pop(var, None)
     return env
 
@@ -598,6 +623,7 @@ def run_keyless_gate(
 
 __all__ = [
     "CREDENTIAL_ENV_VARS_TO_STRIP",
+    "DATABASE_ENV_VARS_TO_STRIP",
     "DRY_RUN_TIMEOUT_S",
     "ExtrasCheckResult",
     "KEYLESS_IMPORT_SNIPPET",

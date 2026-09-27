@@ -5,7 +5,12 @@
 // the SSE frame vocabulary from `api/compileWire.ts` -- never redeclared a
 // second time here.
 import type {
+  AttachmentDeleteResponse,
+  AttachmentUploadResponse,
+  ClarifyRequest,
+  ClarifyResponse,
   CompileSnapshot,
+  DatabaseStarterOut,
   DeleteGraphResponse,
   ExportResponse,
   GenerateGraphRequest,
@@ -68,6 +73,14 @@ export class ReviewUnavailableError extends ApiError {}
  * be imported. */
 export class TemplatesUnavailableError extends ApiError {}
 
+/** GET /api/database-starters 503 -- swarm_builder.templates.database could
+ * not be read (the module could not be imported, or one of the three
+ * ``starter.json`` files it loads at import is missing or malformed). The
+ * same transient/defensive state as `TemplatesUnavailableError`, and the same
+ * consequence for the caller: the three database palette entries stay
+ * disabled rather than creating a node nothing can materialize. */
+export class StartersUnavailableError extends ApiError {}
+
 /** PUT /api/settings 422 -- the submitted provider/model/key combination is
  * not usable. `detail` carries every problem found, so the form can show them
  * all at once rather than one per attempt. */
@@ -93,14 +106,24 @@ async function parseErrorDetail(response: Response): Promise<unknown> {
   }
 }
 
+/** A body a caller may pass to `request`: a JSON string (the common case), or a
+ * `FormData` for the one multipart endpoint. A `FormData` body must NOT get a
+ * `Content-Type` header -- the browser sets it, boundary and all, and overriding
+ * it makes the server unable to parse the parts. */
+type RequestBody = string | FormData;
+
+function isJsonBody(body: RequestBody | null | undefined): body is string {
+  return typeof body === 'string';
+}
+
 async function request<T>(
   path: string,
-  init?: RequestInit,
+  init?: Omit<RequestInit, 'body'> & { body?: RequestBody | null },
 ): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
     headers: {
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(isJsonBody(init?.body) ? { 'Content-Type': 'application/json' } : {}),
       ...init?.headers,
     },
   });
@@ -155,6 +178,21 @@ async function listTemplates(): Promise<TemplateEntryOut[]> {
   } catch (err) {
     if (err instanceof ApiError && err.status === 503) {
       throw new TemplatesUnavailableError(err.status, err.detail);
+    }
+    throw err;
+  }
+}
+
+/** The database starter catalog (`GET /api/database-starters`): one entry per
+ * kind, each carrying the default operation, example data and the mandatory
+ * I/O pair a new node is created from. Mirrors `listTemplates`'s 503 handling
+ * exactly, so both catalogs degrade into one named, catchable state. */
+async function listDatabaseStarters(): Promise<DatabaseStarterOut[]> {
+  try {
+    return await request<DatabaseStarterOut[]>('/database-starters');
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 503) {
+      throw new StartersUnavailableError(err.status, err.detail);
     }
     throw err;
   }
@@ -295,6 +333,45 @@ function generateGraph(body: GenerateGraphRequest): Promise<GenerateGraphRespons
     method: 'POST',
     body: JSON.stringify(body),
   });
+}
+
+/** The analysis pass that decides whether questions are needed before drafting
+ * (`POST /api/graphs/generate/clarify`). One model call, no drafting. */
+function clarifyGraph(
+  body: ClarifyRequest,
+  opts?: { signal?: AbortSignal },
+): Promise<ClarifyResponse> {
+  return request<ClarifyResponse>('/graphs/generate/clarify', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    signal: opts?.signal,
+  });
+}
+
+/** Upload one supplementary file (`POST /api/graphs/attachments`, multipart).
+ * One file per request: the panel shows a per-file error and a per-file chip, and
+ * the server enforces the per-file cap while reading the body. */
+function uploadAttachment(
+  file: File,
+  opts?: { signal?: AbortSignal },
+): Promise<AttachmentUploadResponse> {
+  const form = new FormData();
+  form.append('file', file);
+  return request<AttachmentUploadResponse>('/graphs/attachments', {
+    method: 'POST',
+    body: form,
+    signal: opts?.signal,
+  });
+}
+
+/** Discard an uploaded attachment (`DELETE /api/graphs/attachments/:id`). Used
+ * when a chip is removed and when the panel unmounts mid-upload, so an orphan
+ * cannot sit in the workspace for its whole TTL. */
+function deleteAttachment(attachmentId: string): Promise<AttachmentDeleteResponse> {
+  return request<AttachmentDeleteResponse>(
+    `/graphs/attachments/${encodeURIComponent(attachmentId)}`,
+    { method: 'DELETE' },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +667,7 @@ export const api = {
   putGraph,
   deleteGraph,
   listTemplates,
+  listDatabaseStarters,
   getModels,
   getSettings,
   putSettings,
@@ -601,6 +679,9 @@ export const api = {
   cancelCompile,
   subscribeCompileEvents,
   generateGraph,
+  clarifyGraph,
+  uploadAttachment,
+  deleteAttachment,
   startRun,
   listRuns,
   getRun,

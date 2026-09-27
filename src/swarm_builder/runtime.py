@@ -60,6 +60,15 @@ RUN_TEST_MODEL_ENV_VAR = "SWARM_RUN_TEST_MODEL"
 #: The value every one of :data:`DRY_RUN_ENV_VARS` must hold to count.
 DRY_RUN_ENABLED_VALUE = "1"
 
+#: The variable that swaps the drafting model (and the clarify pass, which is
+#: the same stub-or-model decision) for a deterministic stub. It lives here, and
+#: not in ``compile/generate.py`` where it started, because *two* modules now need
+#: it and one of them is imported by the other: keeping the constant and the
+#: predicate here makes the dependency one-way (generate -> clarify) instead of a
+#: cycle. ``compile.generate`` re-exports both names, so no existing import breaks.
+FAKE_DRAFT_ENV_VAR = "SWARM_FAKE_GENERATE"
+FAKE_DRAFT_ENABLED_VALUE = "1"
+
 #: The credential variables *this process* has published, so they can be
 #: retracted when the configuration that justified them goes away. Only names
 #: this module set are ever removed: a variable the user exported, or one a
@@ -102,6 +111,20 @@ def dry_run_active(cfg: AppConfig | None = None) -> bool:
     if cfg is not None and cfg.dry_run:
         return True
     return dry_run_forced_by_env()
+
+
+def fake_draft_enabled() -> bool:
+    """Whether drafting (and the clarify pass) uses the deterministic stub.
+
+    True when :data:`FAKE_DRAFT_ENV_VAR` is set to ``1`` *or* dry run is active.
+    Read per call, never cached: generation is a single request rather than a
+    long job, so there is no mid-flight state to freeze and a settings change
+    between two requests must be honoured by both.
+
+    Shared by the drafter and the clarify pass so a shape change to either cannot
+    leave one of them calling a real model while the other is stubbed.
+    """
+    return dry_run_active() or os.environ.get(FAKE_DRAFT_ENV_VAR) == FAKE_DRAFT_ENABLED_VALUE
 
 
 def current_model_config(cfg: AppConfig | None = None) -> AppModelConfig | None:
@@ -256,6 +279,8 @@ def is_published_by_us(name: str) -> bool:
 
 __all__ = [
     "DRY_RUN_ENABLED_VALUE",
+    "FAKE_DRAFT_ENABLED_VALUE",
+    "FAKE_DRAFT_ENV_VAR",
     "child_process_env",
     "is_published_by_us",
     "DRY_RUN_ENV_VARS",
@@ -265,6 +290,7 @@ __all__ = [
     "dry_run_active",
     "dry_run_forced_by_env",
     "dry_run_forced_env_vars",
+    "fake_draft_enabled",
     "publish_secrets",
     "secret_env_overrides",
     "spec_for_config",

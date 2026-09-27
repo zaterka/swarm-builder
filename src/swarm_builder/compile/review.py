@@ -26,7 +26,11 @@ pipeline orchestrator, since this module only ever sees a
 
 from __future__ import annotations
 
+import json
 import keyword
+import re
+import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from swarm_builder.compile.graph_ir import (
@@ -38,9 +42,13 @@ from swarm_builder.models import (
     DelegateEdge,
     FanoutEdge,
     JoinEdge,
+    NosqlSpec,
     SeqEdge,
+    SqlSpec,
     SwarmGraph,
     SwarmNode,
+    VectorDocument,
+    VectorSpec,
 )
 from swarm_builder.slugify import IDENTIFIER_RE
 
@@ -51,6 +59,9 @@ _KIND_TO_SPEC_ATTR: dict[str, str] = {
     "programmatic": "programmatic",
     "decision": "decision",
     "join": "join",
+    "sql": "sql",
+    "nosql": "nosql",
+    "vector": "vector",
 }
 
 #: Depth-first-search colours for the cycle check.
@@ -66,6 +77,91 @@ _LIST_REDUCER_OUTPUT_TYPE = "list[str]"
 #: Fewer inbound arms than this makes a join structurally unusual (and is
 #: more often a modeling slip than a deliberate choice).
 _MIN_JOIN_ARMS = 2
+
+#: The three database kinds. Declared here rather than imported from
+#: ``compile.database``, which has the same set: that module imports the starter
+#: catalog at import time, and this module must not -- see
+#: :func:`_check_db_starter_drift`.
+_DATABASE_KINDS = ("sql", "nosql", "vector")
+
+#: The one output port a database node may declare. A read returns rows, so
+#: coercing the result to ``json`` (one dict) or ``str`` is lossy the moment it
+#: crosses an edge.
+_DATABASE_OUTPUT_TYPE = "list[json]"
+
+#: kind -> the input port types that kind can bind. Everything else is rejected:
+#: ``list[json]`` for all three (a list of rows is not a parameter source) and
+#: ``list[str]`` for vector (a similarity search's input is the query text).
+_BINDABLE_INPUT_TYPES: dict[str, tuple[str, ...]] = {
+    "sql": ("str", "json", "list[str]"),
+    "nosql": ("str", "json", "list[str]"),
+    "vector": ("str",),
+}
+
+#: kind -> how that kind's bindable input reads inside a finding's message, so
+#: the message states the rule rather than only the violation.
+_INPUT_TYPE_RULE: dict[str, str] = {
+    "sql": (
+        "'str' (bound as the single parameter ':input'), "
+        "'list[str]' (the same ':input' placeholder, expanded to one bound name per "
+        "element so 'IN (:input)' works), or "
+        "'json' (its keys bind directly as ':key', plus ':input' for the whole dict)"
+    ),
+    "nosql": (
+        "'str' (the value a filter's '$input' sentinel takes), "
+        "'list[str]' (the same sentinel, taking the whole list -- the shape an "
+        "'$in' needs), or "
+        "'json' (merged over the filter's top level)"
+    ),
+    "vector": "'str' (the query text)",
+}
+
+#: kind -> the spec fields :func:`_check_db_operations` refuses to see empty,
+#: and why an empty one is a defect rather than a degraded node. One row per
+#: field the plan names, so the message can say what would go wrong.
+_EMPTY_OPERATION_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
+    "sql": (
+        ("query", "the emitted step would run an empty statement"),
+        ("seed_sql", "the mock's database would have no schema and no rows"),
+    ),
+    "nosql": (
+        ("collection", "the emitted step would read a collection with no name"),
+        ("operation", "the emitted step would call an operation the repository does not implement"),
+    ),
+    "vector": (("collection", "the emitted index would have no name to search"),),
+}
+
+#: A ``:name`` placeholder in a SQL declaration, ignoring ``::type`` casts: the
+#: lookbehind skips a cast's second colon, so ``total::numeric`` yields no
+#: placeholder while ``WHERE name = :input`` yields ``input``.
+_SQL_PLACEHOLDER_RE = re.compile(r"(?<!:):([A-Za-z_][A-Za-z0-9_]*)")
+
+#: kind -> the spec fields :func:`_check_db_starter_drift` compares with the
+#: kind's ``starter.json``: the operation and the seed, which is what the plan's
+#: rule names. ``note`` is deliberately absent -- it is free help text the
+#: Inspector renders, so rewriting it does not change what the node does.
+_DRIFT_FIELDS: dict[str, tuple[str, ...]] = {
+    "sql": ("query", "seed_sql", "write"),
+    "nosql": ("collection", "operation", "filter", "limit", "seed"),
+    "vector": ("collection", "top_k", "min_score", "seed"),
+}
+
+
+@dataclass(frozen=True)
+class _DbToolReference:
+    """One ``<kind>:<node_id>`` entry in an agent's ``tools`` list, resolved.
+
+    The two checks over these entries (a bad reference and a write operation)
+    share this resolution, so "which node does this entry name" is answered in
+    one place and neither check can disagree with the other about it.
+    ``target`` is ``None`` when the id names no node at all.
+    """
+
+    agent_id: str
+    entry: str
+    kind: str
+    target_id: str
+    target: SwarmNode | None
 
 
 @dataclass(frozen=True)
@@ -146,6 +242,7 @@ def review(graph: SwarmGraph) -> ReviewResult:
     _check_kind_spec_consistency(graph, findings)
     _check_missing_intent(graph, findings)
     _check_delegate_vs_structural_target(graph, findings)
+    _check_delegate_targets_are_agents(graph, node_by_id, findings)
 
     structure = analyze(graph)
 
@@ -156,6 +253,17 @@ def review(graph: SwarmGraph) -> ReviewResult:
     _check_port_types(graph, node_by_id, findings)
     _check_sink_output_consistency(graph, structure, node_by_id, findings)
     _check_state_ownership(graph, structure, findings)
+    _check_db_operations(graph, findings)
+    _check_db_template_set(graph, findings)
+    _check_db_operation_io(graph, findings)
+    _check_db_input_type_binding(graph, findings)
+    _check_db_placeholders(graph, findings)
+    _check_db_seed_validity(graph, findings)
+    _check_db_tool_references(graph, node_by_id, findings)
+    _check_db_tool_writes(graph, node_by_id, findings)
+    _check_db_limit_warnings(graph, findings)
+    _check_db_starter_drift(graph, findings)
+    _check_db_seed_sharing(graph, findings)
     _check_delegates_to_warnings(graph, node_by_id, findings)
     _check_join_shape_warnings(graph, structure, node_by_id, findings)
 
@@ -727,8 +835,615 @@ def _check_state_ownership(
 
 
 # ---------------------------------------------------------------------------
+# Database nodes (kinds sql / nosql / vector)
+#
+# Phase 1 is the only defence for these. A database node's operation and seed
+# are *declared data*: the emitter renders them verbatim into a generated
+# project and nothing downstream re-derives them, so a defect that gets past
+# this section reaches that project as a run-time failure -- an unbound
+# `:placeholder`, an empty query, a seed that does not parse, a write reachable
+# from a model's tool call. Every rule below is decided from the document alone,
+# except `db_starter_drift`, which reads the kind's `starter.json` through a
+# lazy import inside the check and is skipped entirely when the catalog cannot
+# be imported: `review()` must not gain an import-time dependency on a catalog
+# it consults for one warning.
+# ---------------------------------------------------------------------------
+
+
+def _db_spec(node: SwarmNode) -> SqlSpec | NosqlSpec | VectorSpec | None:
+    """The one spec a database-kind node carries, or ``None`` when it is absent.
+
+    ``SwarmNode`` cannot express "kind=sql implies a sql spec" as a field rule,
+    so a document can carry a database kind with no spec at all. Every rule in
+    this section therefore tolerates the absence: ``db_empty_operation`` reports
+    it once, and the rest skip the node rather than raising ``AttributeError``
+    out of ``review()``.
+    """
+    if node.kind == "sql":
+        return node.sql
+    if node.kind == "nosql":
+        return node.nosql
+    if node.kind == "vector":
+        return node.vector
+    return None
+
+
+def _check_db_operations(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Require every database node to declare a non-empty operation and seed.
+
+    A database node's body is emitted from its declared operation, never written
+    by a model, so an empty one cannot be filled in later: the emitted step would
+    hand the repository an empty statement, an unnamed collection or no seed to
+    load, and fail at run time in a project that already compiled. An empty value
+    means the node was never materialized from its kind's starter, or was emptied
+    by hand -- the case the plan calls out for a handwritten ``sql: null`` node.
+    """
+    for node in graph.nodes:
+        if node.kind not in _DATABASE_KINDS:
+            continue
+        spec = _db_spec(node)
+        if spec is None:
+            findings.error(
+                "db_empty_operation",
+                f"{node.kind} node {node.id!r} carries no {node.kind!r} spec, so it "
+                "declares no operation at all (the Inspector materializes one from "
+                "the kind's starter when the node is created)",
+                (node.id,),
+            )
+            continue
+        for field_name, why in _EMPTY_OPERATION_FIELDS[node.kind]:
+            if str(getattr(spec, field_name, None) or "").strip():
+                continue
+            findings.error(
+                "db_empty_operation",
+                f"{node.kind} node {node.id!r} declares an empty {field_name!r} "
+                f"({why}); a database node's operation is declared data, so nothing "
+                "downstream can fill it in -- the Inspector copies it from the kind's "
+                "starter when the node is created",
+                (node.id,),
+            )
+
+
+def _check_db_template_set(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Reject a ``template`` on a database node.
+
+    Templates are agent-only: a template selects the model-authored agent module
+    and its instructions, and the Inspector hides the field for the three
+    database kinds. The emitter ignores a database node's ``template``
+    entirely, so a value here would be silently dropped -- and the only way one
+    appears is a hand edit or a document whose node changed kind, which is
+    exactly the case a silent ignore would hide forever.
+    """
+    for node in graph.nodes:
+        if node.kind not in _DATABASE_KINDS or node.template is None:
+            continue
+        findings.error(
+            "db_template_set",
+            f"{node.kind} node {node.id!r} also carries template "
+            f"{node.template!r}; templates are agent-only, so this value is never "
+            "emitted (clear the field, or make the node an agent node)",
+            (node.id,),
+        )
+
+
+def _check_db_operation_io(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Require every database node to declare its kind's mandatory I/O pair.
+
+    A database node's ports are not a choice: the emitted step returns rows
+    (``list[json]``) and takes the kind's bindable input type, and the Inspector
+    copies the pair from the starter. Anything else either makes the step's
+    return value lossy on the next edge or declares an input the binding rule
+    cannot supply -- so the pair is checked as a pair, not as two ports.
+    """
+    for node in graph.nodes:
+        if node.kind not in _DATABASE_KINDS:
+            continue
+        allowed_inputs = _BINDABLE_INPUT_TYPES[node.kind]
+        if node.io.input_type in allowed_inputs and node.io.output_type == _DATABASE_OUTPUT_TYPE:
+            continue
+        findings.error(
+            "db_op_io_mismatch",
+            f"{node.kind} node {node.id!r} declares io {node.io.input_type!r} -> "
+            f"{node.io.output_type!r}; a {node.kind} node's pair is mandatory: "
+            f"{_INPUT_TYPE_RULE[node.kind]} -> 'list[json]' (the step passes rows on, "
+            "never one document)",
+            (node.id,),
+        )
+
+
+def _check_db_input_type_binding(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Reject an input port type the node's kind cannot bind.
+
+    The upstream value is a database node's only parameter source, and §4.3
+    gives three shapes a binding rule: one ``str``, one ``json`` dict, and (for
+    SQL only) a ``list[str]`` expanded into ``:input_0, :input_1, …``. An input
+    type outside that set has no rule, so it cannot be honoured at run time
+    (SQL/NoSQL would raise on an unbound parameter; a vector node would quietly
+    search for nothing). This rule therefore overlaps ``db_op_io_mismatch`` on
+    exactly the rejected cells -- both statements are true of such a node, and
+    each names the rule it breaks -- while ``db_op_io_mismatch`` also covers the
+    pairs built from a bindable type with the wrong port.
+    """
+    for node in graph.nodes:
+        if node.kind not in _DATABASE_KINDS:
+            continue
+        if node.io.input_type in _BINDABLE_INPUT_TYPES[node.kind]:
+            continue
+        findings.error(
+            "db_input_type_unsupported",
+            f"{node.kind} node {node.id!r} declares input_type "
+            f"{node.io.input_type!r}, which a {node.kind} node cannot bind: expected "
+            f"{_INPUT_TYPE_RULE[node.kind]}",
+            (node.id,),
+        )
+
+
+def _check_db_placeholders(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Require a SQL node's ``:name`` placeholders to match its declared input.
+
+    §4.3 fixes one binding rule per input type, and a placeholder nothing
+    supplies is not a modelling detail: sqlite3 -- and every live driver -- raises
+    on the first row requested, inside the generated project. The rules are: a
+    ``str`` input binds exactly one parameter, named ``:input``; a ``json``
+    input's keys bind directly, so the query needs at least one placeholder; and
+    a ``list[str]`` input expands a *single* ``:input`` placeholder into
+    ``:input_0, :input_1, …``.
+
+    Placeholders are parsed with a regex that ignores ``::type`` casts, because a
+    cast's second colon is not a placeholder: without that, ``total::numeric``
+    would be read as a parameter named ``numeric`` and reported as a mismatch on
+    a perfectly bindable query.
+    """
+    for node in graph.nodes:
+        if node.kind != "sql" or node.sql is None:
+            continue
+        query = str(node.sql.query or "")
+        if not query.strip():
+            # An empty query is already reported once, by db_empty_operation.
+            continue
+        input_type = node.io.input_type
+        placeholders = _SQL_PLACEHOLDER_RE.findall(query)
+        if input_type == "str":
+            if set(placeholders) == {"input"}:
+                continue
+            findings.error(
+                "db_placeholder_mismatch",
+                f"SQL node {node.id!r} declares input_type 'str', which binds exactly "
+                "one parameter named ':input', but its query's named placeholders are "
+                f"{sorted(set(placeholders))!r} (':name' placeholders are parsed "
+                "ignoring '::' casts, and one nothing binds fails at run time)",
+                (node.id,),
+            )
+        elif input_type == "json":
+            if placeholders:
+                continue
+            findings.error(
+                "db_placeholder_mismatch",
+                f"SQL node {node.id!r} declares input_type 'json', whose keys bind "
+                "directly (as ':key', plus ':input' for the whole dict), but its query "
+                "has no ':name' placeholder to bind anything to",
+                (node.id,),
+            )
+        elif input_type == "list[str]":
+            if placeholders == ["input"]:
+                continue
+            findings.error(
+                "db_placeholder_mismatch",
+                f"SQL node {node.id!r} declares input_type 'list[str]', which expands a "
+                "single ':input' placeholder into ':input_0, :input_1, …', but its "
+                f"query's named placeholders are {placeholders!r}",
+                (node.id,),
+            )
+        # Any other input type (only 'list[json]') has no binding rule at all, so
+        # there is no placeholder rule to check against it: db_input_type_unsupported
+        # reports it.
+
+
+def _check_db_seed_validity(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Require every declared seed to parse for its kind.
+
+    The seed *is* the mock: the emitter copies it into the generated project and
+    the mock loads it before the first read, so a seed that does not parse fails
+    there, at run time, on the first step that touches the node -- long after
+    Phase 1 could have said so. A SQL seed is probed by running it through an
+    in-memory SQLite database (stdlib only, no server, no file, nothing left
+    behind); a NoSQL or vector seed has to be a list of JSON objects. An *empty*
+    list stays legal: it is a node whose mock holds no documents yet, which is a
+    valid state rather than an unparseable one.
+    """
+    for node in graph.nodes:
+        if node.kind not in _DATABASE_KINDS:
+            continue
+        spec = _db_spec(node)
+        if spec is None:
+            continue
+        problem: str | None = None
+        if isinstance(spec, SqlSpec):
+            if not str(spec.seed_sql or "").strip():
+                # Already reported once, by db_empty_operation.
+                continue
+            problem = _sql_seed_problem(spec.seed_sql)
+        elif isinstance(spec, NosqlSpec):
+            problem = _document_seed_problem(spec.seed, requires_text=False)
+        elif isinstance(spec, VectorSpec):
+            problem = _document_seed_problem(spec.seed, requires_text=True)
+        if problem is None:
+            continue
+        findings.error(
+            "db_seed_invalid",
+            f"{node.kind} node {node.id!r} has a seed that does not parse ({problem}); "
+            "the seed is the mock's schema and rows, so every step on this node would "
+            "fail in the generated project",
+            (node.id,),
+        )
+
+
+def _sql_seed_problem(seed_sql: str) -> str | None:
+    """Run a SQL seed through an in-memory SQLite probe; ``None`` when it runs.
+
+    ``sqlite3`` is the mock's own engine, so probing with it is the only faithful
+    test of "this seed will load" that needs no server and no driver. The
+    connection is created, used and closed inside this function and never
+    escapes: a leak would keep a database alive for the life of the process for
+    a check that is otherwise pure.
+
+    ``ValueError`` is caught alongside ``sqlite3.Error`` because that is what
+    ``sqlite3`` raises for a statement containing a NUL character -- a defect a
+    hand-edited seed can contain, and one this check has to report rather than
+    propagate as a crash out of ``review()``.
+    """
+    connection = sqlite3.connect(":memory:")
+    try:
+        connection.executescript(seed_sql)
+    except (sqlite3.Error, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    finally:
+        connection.close()
+    return None
+
+
+def _document_seed_problem(seed: object, *, requires_text: bool) -> str | None:
+    """Why a document or vector seed is not a JSON array of objects, or ``None``.
+
+    ``requires_text`` is the vector node's extra requirement: a vector document
+    is only searchable with a non-empty ``id`` (which the mock returns, and which
+    breaks score ties) and a non-empty ``text`` (which the embedder hashes), so an
+    empty one is a document the mock can never return.
+    """
+    if not isinstance(seed, (list, tuple)):
+        return f"the seed is {type(seed).__name__}, not a JSON array of documents"
+    for index, entry in enumerate(seed):
+        document = _seed_document(entry)
+        if document is None:
+            return f"seed entry {index} is {type(entry).__name__}, not a JSON object"
+        if not requires_text:
+            continue
+        for field_name in ("id", "text"):
+            if not str(document.get(field_name) or "").strip():
+                return f"seed entry {index} has no non-empty {field_name!r}"
+    return None
+
+
+def _seed_document(entry: object) -> dict[str, object] | None:
+    """One seed entry as a plain dict, or ``None`` when it is not an object.
+
+    Two shapes reach here: a NoSQL seed is declared ``list[dict]``, and a vector
+    seed is a list of :class:`VectorDocument` models. Both become a JSON object
+    once rendered, which is what the mock loads and what this check is about.
+    """
+    if isinstance(entry, Mapping):
+        return dict(entry)
+    if isinstance(entry, VectorDocument):
+        return entry.model_dump()
+    return None
+
+
+def _db_tool_references(
+    graph: SwarmGraph, node_by_id: dict[str, SwarmNode]
+) -> list[_DbToolReference]:
+    """Every ``<kind>:<node_id>`` entry in any agent's ``tools`` list, resolved.
+
+    ``tools`` is a free ``list[str]`` that also carries catalog names such as
+    ``web_search``, so an entry is only treated as a database reference when its
+    namespace before the first colon is one of the three database kinds. A
+    trailing colon (``"sql:"``) is kept rather than dropped: it is a malformed
+    reference, which is a finding, not an entry to ignore.
+    """
+    references: list[_DbToolReference] = []
+    for node in graph.nodes:
+        if node.agent is None:
+            continue
+        for entry in node.agent.tools:
+            kind, separator, target_id = entry.partition(":")
+            if not separator or kind not in _DATABASE_KINDS:
+                continue
+            references.append(
+                _DbToolReference(
+                    agent_id=node.id,
+                    entry=entry,
+                    kind=kind,
+                    target_id=target_id,
+                    target=node_by_id.get(target_id),
+                )
+            )
+    return references
+
+
+def _check_db_tool_references(
+    graph: SwarmGraph, node_by_id: dict[str, SwarmNode], findings: _FindingCollector
+) -> None:
+    """Require every database tool entry to name a node of that kind.
+
+    An agent attaches a database node as a read-only tool by naming it
+    ``<kind>:<node_id>``, and the emitter builds that tool from the *named
+    node's* declared operation. So a bad reference is a generated project whose
+    agent has no tool for a tool its prompt promises -- or a tool built from a
+    different node than the document says. A malformed entry (``"sql:"`` with no
+    id) is reported here too, since it names nothing and would otherwise be
+    silently ignored.
+    """
+    for reference in _db_tool_references(graph, node_by_id):
+        if not reference.target_id:
+            findings.error(
+                "db_tool_unknown_node",
+                f"agent node {reference.agent_id!r} lists {reference.entry!r} in "
+                "tools, but a database tool entry must be '<kind>:<node_id>' and this "
+                "one names no node",
+                (reference.agent_id,),
+            )
+            continue
+        if reference.target is None:
+            findings.error(
+                "db_tool_unknown_node",
+                f"agent node {reference.agent_id!r} lists {reference.entry!r} in "
+                f"tools, but no node {reference.target_id!r} exists in this graph",
+                (reference.agent_id, reference.target_id),
+            )
+            continue
+        if reference.target.kind != reference.kind:
+            findings.error(
+                "db_tool_unknown_node",
+                f"agent node {reference.agent_id!r} lists {reference.entry!r} in "
+                f"tools, but node {reference.target_id!r} has kind "
+                f"{reference.target.kind!r}, not {reference.kind!r}",
+                (reference.agent_id, reference.target_id),
+            )
+
+
+def _check_db_tool_writes(
+    graph: SwarmGraph, node_by_id: dict[str, SwarmNode], findings: _FindingCollector
+) -> None:
+    """Reject an agent tool that names a database node in write mode.
+
+    A database node in write mode emits an ``execute()`` call rather than a read,
+    and a write reachable from a model's tool call is the injection surface this
+    design refuses to create -- there is deliberately no free-form SQL tool in
+    v1. So the combination is an error rather than a silent downgrade to a
+    read-only tool: a document that asks for it has to be changed, and a
+    downgrade would hide a graph that does not do what it says.
+
+    References that do not resolve are skipped: ``db_tool_unknown_node`` already
+    reports them.
+    """
+    for reference in _db_tool_references(graph, node_by_id):
+        target = reference.target
+        if target is None or target.kind != reference.kind:
+            continue
+        write_detail: str | None = None
+        if target.sql is not None and target.sql.write:
+            write_detail = "sql.write is true"
+        elif target.nosql is not None and target.nosql.operation == "insert_one":
+            write_detail = "nosql.operation is 'insert_one'"
+        if write_detail is None:
+            continue
+        findings.error(
+            "db_write_as_tool",
+            f"agent node {reference.agent_id!r} lists {reference.entry!r} in tools, "
+            f"but node {reference.target_id!r} is a write operation ({write_detail}); "
+            "a write reachable from a model's tool call is the injection surface this "
+            "design refuses to create, so an agent may attach a database node's read "
+            "operation only",
+            (reference.agent_id, reference.target_id),
+        )
+
+
+def _check_db_limit_warnings(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Warn about a NoSQL node whose declared limit reads as "no limit".
+
+    ``limit <= 0`` is documented as unbounded, so the step returns every matching
+    document -- legal, and occasionally deliberate, but far more often a
+    half-finished edit than a choice. It is a warning for that reason: the graph
+    still compiles and runs.
+    """
+    for node in graph.nodes:
+        spec = node.nosql
+        if node.kind != "nosql" or spec is None:
+            continue
+        if spec.limit > 0:
+            continue
+        findings.warn(
+            "db_limit_unset",
+            f"NoSQL node {node.id!r} declares limit {spec.limit}, which the repository "
+            "reads as 'no limit': the step would return every matching document",
+            (node.id,),
+        )
+
+
+def _check_db_starter_drift(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Warn when a database node's operation or seed differs from its starter.
+
+    A database node is created from a starter template whose operation and seed
+    are consistent by construction, and the Inspector offers "Reset to example".
+    A drifted node is therefore either a deliberate edit or a stale one, and the
+    warning is what tells the two apart in a compiled project whose mock returns
+    something other than the example data.
+
+    The catalog is imported *inside* this check and the whole check is skipped
+    when that import fails, so ``review()`` never gains an import-time dependency
+    on ``templates/database`` -- the same degradation seam the API routes use.
+    A catalog that cannot be read is not a graph defect, so this check reports
+    nothing rather than raising. A document with no database node never imports
+    it at all, so review is unchanged for every graph that has none.
+    """
+    declared = [
+        (node, spec)
+        for node in graph.nodes
+        if node.kind in _DATABASE_KINDS and (spec := _db_spec(node)) is not None
+    ]
+    if not declared:
+        return
+    try:
+        from swarm_builder.templates.database import get_database_entry
+    except Exception:
+        return
+    for node, spec in declared:
+        try:
+            starter_spec = get_database_entry(node.kind).starter_spec
+        except Exception:
+            return
+        drifted = [
+            field_name
+            for field_name in _DRIFT_FIELDS[node.kind]
+            if getattr(spec, field_name, None) != getattr(starter_spec, field_name, None)
+        ]
+        if not drifted:
+            continue
+        findings.warn(
+            "db_starter_drift",
+            f"{node.kind} node {node.id!r} differs from the {node.kind} starter in "
+            f"{drifted!r}; the starter is the example this node was created from, so "
+            "the mock will not contain the example data (the Inspector's 'Reset to "
+            "example' restores it)",
+            (node.id,),
+        )
+
+
+def _check_db_seed_sharing(graph: SwarmGraph, findings: _FindingCollector) -> None:
+    """Warn when two nodes of one kind declare different seeds.
+
+    The generated factory keys one mock instance per ``(kind, seed)``, so two
+    nodes over the same seed share one database -- a write in the first step is
+    visible to the second -- while two nodes over different seeds get independent
+    instances and neither node's seed is silently ignored. That is correct, and
+    it is also invisible: a workflow that expected one shared database gets two,
+    with a write in one step missing from the other's reads. Hence a warning, not
+    an error: the graph builds and runs either way.
+    """
+    seeds_by_kind: dict[str, dict[str, list[str]]] = {}
+    for node in graph.nodes:
+        if node.kind not in _DATABASE_KINDS:
+            continue
+        spec = _db_spec(node)
+        if spec is None:
+            continue
+        key = _seed_key(node, spec)
+        seeds_by_kind.setdefault(node.kind, {}).setdefault(key, []).append(node.id)
+    for kind in sorted(seeds_by_kind):
+        by_seed = seeds_by_kind[kind]
+        if len(by_seed) < 2:
+            continue
+        node_ids = tuple(sorted(node_id for ids in by_seed.values() for node_id in ids))
+        findings.warn(
+            "db_separate_mock_instances",
+            f"this graph has {len(node_ids)} {kind} nodes over {len(by_seed)} different "
+            f"seeds {list(node_ids)!r}: each seed gets its own mock instance, so a "
+            "write in one step is not visible to the others (give them the same seed "
+            "to share one)",
+            node_ids,
+        )
+
+
+def _seed_key(node: SwarmNode, spec: SqlSpec | NosqlSpec | VectorSpec) -> str:
+    """The seed text the generated factory keys a mock instance by.
+
+    **Delegates to the renderer** (:func:`~swarm_builder.compile.database.database_seed_text`)
+    instead of normalizing the spec fields here. A second copy of "what the seed
+    file will contain" is exactly the kind of table that drifts: the factory keys
+    the mock by a digest of the *rendered* text, so a check that predicted it
+    differently would warn about two nodes that in fact share one database, or
+    stay silent about two that do not. ``database_seed_text`` returns ``None``
+    for a node with no spec, which ``_db_spec`` has already filtered out here.
+
+    A seed that is not a list at all can only come from a document built by hand
+    rather than validated; it is reported by ``db_seed_invalid``, and all this
+    function has to do with it is produce a key that collides with no real
+    seed's.
+    """
+    # Imported here, not at module level, for the same reason the catalog read
+    # below is: ``compile.database`` imports ``templates.database``, so a
+    # module-level import would make every ``review()`` call -- including one for
+    # a graph with no database node at all -- pull the catalog in, which is the
+    # import-time dependency this module deliberately does not have.
+    from swarm_builder.compile.database import database_seed_text
+
+    rendered = database_seed_text(node)
+    if rendered is not None:
+        return rendered
+    seed = spec.seed
+    if not isinstance(seed, (list, tuple)):
+        return json.dumps(seed, default=repr, sort_keys=True)
+    documents = [_seed_document(document) for document in seed]
+    return json.dumps(documents, indent=2, ensure_ascii=False) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # Soft findings -> warnings
 # ---------------------------------------------------------------------------
+
+
+def _check_delegate_targets_are_agents(
+    graph: SwarmGraph, node_by_id: dict[str, SwarmNode], findings: _FindingCollector
+) -> None:
+    """A delegate target must be an existing ``agent`` node.
+
+    Delegation is compiled as a **tool**: an orchestrator's factory emits, for
+    every entry in ``agent.delegates_to``, an import of
+    ``.../agents/<child>.py`` and a call to its ``build_agent``. Only ``agent``
+    nodes get an ``agents/`` module (``scaffold.py`` writes one for
+    ``kind == "agent"`` alone), so a ``delegates_to`` entry naming a database,
+    decision, join or ``programmatic`` node -- or naming nothing at all -- emits a
+    module that imports a file no emitter wrote, and the generated project fails
+    at its keyless import with ``ModuleNotFoundError``. Nothing else catches it:
+    ``_check_delegates_to_warnings`` only notices a *missing edge*, and a
+    ``delegate`` edge to a non-agent node is drawn happily by the canvas.
+
+    This is an error rather than a warning for the same reason a missing marker is
+    a hard failure: the emitted project cannot import, so there is no degraded
+    build to fall back on.
+    """
+    for node in graph.nodes:
+        if node.agent is None:
+            continue
+        for child_id in node.agent.delegates_to:
+            child = node_by_id.get(child_id)
+            if child is None:
+                findings.error(
+                    "delegate_target_not_agent",
+                    f"node {node.id!r} delegates to {child_id!r}, which is not a node in this "
+                    "graph: a delegate target is called as an agent tool, so it must name an "
+                    "existing 'agent' node",
+                    (node.id,),
+                )
+            elif child.kind != "agent":
+                findings.error(
+                    "delegate_target_not_agent",
+                    f"node {node.id!r} delegates to {child_id!r}, which is a {child.kind!r} node: "
+                    "a delegate target is called as an agent tool and only 'agent' nodes get an "
+                    "agents/ module, so this would emit an import of a file that does not exist",
+                    (node.id, child.id),
+                )
+    for edge in graph.edges:
+        if not isinstance(edge, DelegateEdge):
+            continue
+        target = node_by_id.get(edge.target)
+        if target is not None and target.kind != "agent":
+            findings.error(
+                "delegate_target_not_agent",
+                f"delegate edge {edge.id!r} targets {edge.target!r}, which is a "
+                f"{target.kind!r} node: delegation is compiled as an agent tool, so the target "
+                "must be an 'agent' node",
+                (edge.source, edge.target),
+            )
 
 
 def _check_delegates_to_warnings(
