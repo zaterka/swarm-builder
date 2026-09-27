@@ -263,6 +263,32 @@
         }
       }
     },
+    "/api/database-starters": {
+      "get": {
+        "tags": [
+          "templates"
+        ],
+        "summary": "List Database Starters",
+        "description": "Return one starter entry per database kind, in catalog order.\n\nRaises:\n    fastapi.HTTPException: 503 if the database starter catalog cannot be\n        read, so one broken subsystem fails this route rather than server\n        startup.",
+        "operationId": "list_database_starters_api_database_starters_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DatabaseStarterOut"
+                  },
+                  "type": "array",
+                  "title": "Response List Database Starters Api Database Starters Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/models": {
       "get": {
         "tags": [
@@ -1325,7 +1351,6 @@
               "type": "string"
             },
             "type": "array",
-            "maxItems": 5,
             "title": "Attachmentids"
           }
         },
@@ -1484,6 +1509,67 @@
         ],
         "title": "CompileSnapshotResponse",
         "description": "Body of ``GET``/``DELETE /api/compile/{compile_id}``.\n\nMirrors :meth:`~swarm_builder.compile.jobs.Job.snapshot`'s dict\none-for-one, including ``latestEventId`` -- the value a fresh client\npasses back as ``Last-Event-ID`` when it wants to resume rather than\nreplay from the start."
+      },
+      "DatabaseStarterOut": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "sql",
+              "nosql",
+              "vector"
+            ],
+            "title": "Kind"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "spec": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SqlSpec"
+              },
+              {
+                "$ref": "#/components/schemas/NosqlSpec"
+              },
+              {
+                "$ref": "#/components/schemas/VectorSpec"
+              }
+            ],
+            "title": "Spec"
+          },
+          "io": {
+            "$ref": "#/components/schemas/NodeIo"
+          },
+          "liveExtra": {
+            "type": "string",
+            "title": "Liveextra"
+          },
+          "envVars": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Envvars"
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "label",
+          "description",
+          "spec",
+          "io",
+          "liveExtra",
+          "envVars"
+        ],
+        "title": "DatabaseStarterOut",
+        "description": "One database kind's picker-facing entry.\n\n``spec`` and ``io`` are the whole reason this route exists: a new node\ncopies both into the graph document, so the document is self-contained\nand the Inspector shows what will actually run (nothing is substituted at\nscaffold time). ``spec`` is the union of the three spec models, and it is\nthe kind's *validated* model on the server side -- a malformed\n``starter.json`` fails while the catalog is being read, never inside a\ngenerated project.\n\nThe scaffolding-only fields of the catalog entry (``package_module``,\n``live_extra_deps``, ``manifest``) are deliberately not exposed:\n``liveExtra`` names the extra a user must install and ``envVars`` lists\nthe variables the live engine reads, which is everything the canvas can\nhonestly tell a user. ``SWARM_DB_MODE`` is app-wide rather than an\nengine's, so it is not part of any entry's ``envVars``."
       },
       "DecisionBranch": {
         "properties": {
@@ -1718,9 +1804,8 @@
               "type": "string"
             },
             "type": "array",
-            "maxItems": 5,
             "title": "Attachmentids",
-            "description": "Ids returned by POST /api/graphs/attachments."
+            "description": "Ids returned by POST /api/graphs/attachments. The count and total-size caps are enforced by the store, which reports them as a 413 with code attachment_too_large -- not as a schema-validation error."
           },
           "answers": {
             "items": {
@@ -2165,6 +2250,17 @@
               }
             ],
             "title": "Reasoningeffort"
+          },
+          "maxTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxtokens"
           }
         },
         "type": "object",
@@ -2257,7 +2353,8 @@
             "enum": [
               "str",
               "json",
-              "list[str]"
+              "list[str]",
+              "list[json]"
             ],
             "title": "Inputtype"
           },
@@ -2266,7 +2363,8 @@
             "enum": [
               "str",
               "json",
-              "list[str]"
+              "list[str]",
+              "list[json]"
             ],
             "title": "Outputtype"
           }
@@ -2345,6 +2443,61 @@
         ],
         "title": "NodeRunRecord",
         "description": "What one step reported during a run (the last ``node`` frame wins)."
+      },
+      "NosqlSpec": {
+        "properties": {
+          "collection": {
+            "type": "string",
+            "title": "Collection"
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "find",
+              "find_one",
+              "count",
+              "insert_one"
+            ],
+            "title": "Operation",
+            "default": "find"
+          },
+          "filter": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Filter"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit",
+            "default": 20
+          },
+          "seed": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Seed"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "collection"
+        ],
+        "title": "NosqlSpec",
+        "description": "Present on ``kind=\"nosql\"`` nodes: one collection, one operation.\n\n``filter`` values may be the sentinel string ``\"$input\"``, which the\nemitter replaces with the upstream node's value -- so the document can\nsay \"match the field the user's input names\" without carrying any\nexpression language into a JSON document. ``limit`` is a warning\nthreshold rather than a hard rule (``<= 0`` reads as \"unbounded\"), so a\ndeliberate full scan stays expressible."
       },
       "Position": {
         "properties": {
@@ -2796,6 +2949,17 @@
             ],
             "title": "Reasoningeffort"
           },
+          "maxTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maxtokens"
+          },
           "hasApiKey": {
             "type": "boolean",
             "title": "Hasapikey"
@@ -2818,6 +2982,7 @@
           "model",
           "baseUrl",
           "reasoningEffort",
+          "maxTokens",
           "hasApiKey",
           "apiKeyHint"
         ],
@@ -2918,6 +3083,10 @@
           "resolvedDefault": {
             "$ref": "#/components/schemas/ResolvedDefaultOut"
           },
+          "maxTokensDefault": {
+            "type": "integer",
+            "title": "Maxtokensdefault"
+          },
           "inheritedRoutes": {
             "type": "integer",
             "title": "Inheritedroutes"
@@ -2937,6 +3106,7 @@
           "dryRunEnvVars",
           "providers",
           "resolvedDefault",
+          "maxTokensDefault",
           "inheritedRoutes",
           "workspaceWritable"
         ],
@@ -2982,6 +3152,42 @@
         "title": "SettingsUpdateRequest",
         "description": "Body of ``PUT /api/settings``.\n\n``None`` means \"leave this alone\", which is what lets the dry-run switch be\ntoggled without resubmitting the model form (and vice versa). Removing the\nin-app model entirely is the explicit ``clear_model`` flag rather than an\nambiguous ``model: null``."
       },
+      "SqlSpec": {
+        "properties": {
+          "query": {
+            "type": "string",
+            "title": "Query"
+          },
+          "seedSql": {
+            "type": "string",
+            "title": "Seedsql"
+          },
+          "write": {
+            "type": "boolean",
+            "title": "Write",
+            "default": false
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "query",
+          "seedSql"
+        ],
+        "title": "SqlSpec",
+        "description": "Present on ``kind=\"sql\"`` nodes. ``query`` uses ``:name`` placeholders\n(``sqlite3``'s native form -- the live adapter rewrites them for the\ndriver, and one declaration syntax keeps the Inspector honest about\nwhich parameters the query actually binds).\n\nThe split between ``query`` and ``seed_sql`` is deliberate: a node's\ndeclared operation is what the step and any agent tool run, while the\nseed is the mock's schema *and* rows. ``write`` is a declaration, not a\nhint -- it selects the emitted call (``execute()`` instead of\n``query()``) and disqualifies the node as an agent tool, because a\nwrite reachable from a model's tool call is exactly the injection\nsurface this design refuses to create."
+      },
       "StartCompileRequest": {
         "properties": {
           "graphId": {
@@ -3003,7 +3209,7 @@
           "graphId"
         ],
         "title": "StartCompileRequest",
-        "description": "Body of ``POST /api/compile``.\n\n``target`` selects the export: ``pydantic-graph`` (default, the five\nphases) or ``langgraph`` (the five phases, then a conversion of the\nvalidated project into a LangGraph export under\n``workspace/projects-langgraph/<graphId>/``)."
+        "description": "Body of ``POST /api/compile``.\n\n``target`` selects the export: ``pydantic-graph`` (default, the five\nphases) or ``langgraph`` (the five phases, then a conversion of the\nvalidated project into a LangGraph export under\n``workspace/projects-langgraph/<name-slug>/``)."
       },
       "StartCompileResponse": {
         "properties": {
@@ -3071,7 +3277,8 @@
             "enum": [
               "str",
               "json",
-              "list[str]"
+              "list[str]",
+              "list[json]"
             ],
             "title": "Type"
           },
@@ -3218,7 +3425,10 @@
               "agent",
               "programmatic",
               "decision",
-              "join"
+              "join",
+              "sql",
+              "nosql",
+              "vector"
             ],
             "title": "Kind"
           },
@@ -3305,6 +3515,36 @@
                 "type": "null"
               }
             ]
+          },
+          "sql": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SqlSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "nosql": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NosqlSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "vector": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VectorSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -3318,7 +3558,7 @@
           "io"
         ],
         "title": "SwarmNode",
-        "description": "One canvas node.\n\n``id`` is emitted verbatim as the ``node_id=`` argument to\n``builder.step``/``builder.decision``/``builder.join`` and as the step\nmodule's filename, so it must already be a valid, unique Python\nidentifier. The frontend is responsible for deriving it from ``title``\nvia :func:`swarm_builder.slugify.slugify_titles` and keeping it stable\nacross edits: duplicate titles deduplicate with a numeric suffix, and\nthe title-to-id mapping must stay stable across recompiles or a\nrecompile would rename step modules instead of updating them.\n\nExactly one of ``agent`` / ``programmatic`` / ``decision`` / ``join``\nis expected to be set, matching ``kind`` -- enforced by Phase 1\n(``review.py``), not here, since that cross-field rule belongs with the\nrest of the structural graph validation."
+        "description": "One canvas node.\n\n``id`` is emitted verbatim as the ``node_id=`` argument to\n``builder.step``/``builder.decision``/``builder.join`` and as the step\nmodule's filename, so it must already be a valid, unique Python\nidentifier. The frontend is responsible for deriving it from ``title``\nvia :func:`swarm_builder.slugify.slugify_titles` and keeping it stable\nacross edits: duplicate titles deduplicate with a numeric suffix, and\nthe title-to-id mapping must stay stable across recompiles or a\nrecompile would rename step modules instead of updating them.\n\nExactly one of ``agent`` / ``programmatic`` / ``decision`` / ``join`` /\n``sql`` / ``nosql`` / ``vector`` is expected to be set, matching\n``kind`` -- enforced by Phase 1 (``review.py``), not here, since that\ncross-field rule belongs with the rest of the structural graph\nvalidation. A database node's ``io`` pair is likewise fixed by its\nkind (``str -> list[json]``), and it never carries a ``template``:\ntemplates are agent-only, and a stale value there would be silently\nignored."
       },
       "TemplateEntryOut": {
         "properties": {
@@ -3486,6 +3726,74 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VectorDocument": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "text": {
+            "type": "string",
+            "title": "Text"
+          },
+          "metadata": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Metadata"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "id",
+          "text"
+        ],
+        "title": "VectorDocument",
+        "description": "One seeded vector document. ``metadata`` stays a plain dict rather\nthan a per-node schema: the mock never filters on it, and a live\ncollection's payload shape is the user's business, not the canvas's."
+      },
+      "VectorSpec": {
+        "properties": {
+          "collection": {
+            "type": "string",
+            "title": "Collection"
+          },
+          "topK": {
+            "type": "integer",
+            "title": "Topk",
+            "default": 4
+          },
+          "minScore": {
+            "type": "number",
+            "title": "Minscore",
+            "default": 0.0
+          },
+          "seed": {
+            "items": {
+              "$ref": "#/components/schemas/VectorDocument"
+            },
+            "type": "array",
+            "title": "Seed"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "collection"
+        ],
+        "title": "VectorSpec",
+        "description": "Present on ``kind=\"vector\"`` nodes: a collection and a seed index.\n\n``min_score`` is cosine similarity in ``[-1, 1]``, so its default of\n``0.0`` means \"no threshold\" rather than \"no weak matches\" -- a\nthreshold that admitted nothing by default would make a freshly created\nnode return an empty list and look broken."
       }
     }
   }

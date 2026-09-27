@@ -8,21 +8,32 @@
 import { create } from 'zustand';
 import type {
   CompileSnapshot,
+  DatabaseKind,
+  DatabaseStarterMap,
   ModelSelection,
+  NodeIo,
   NodeKind,
   NormalizedAgentSpec,
   NormalizedDecisionSpec,
   NormalizedJoinSpec,
+  NormalizedNosqlSpec,
   NormalizedProgrammaticSpec,
+  NormalizedSqlSpec,
   NormalizedSwarmGraph,
   NormalizedSwarmNode,
+  NormalizedVectorSpec,
   Position,
   StateField,
   SwarmEdge,
   SwarmEdgeKind,
   SwarmGraph,
 } from '../api/schema';
-import { normalizeGraph } from '../api/schema';
+import {
+  buildDatabaseStarterMap,
+  isDatabaseKind,
+  normalizeGraph,
+} from '../api/schema';
+import { api } from '../api/client';
 import type { CompileSseEvent } from '../api/compileWire';
 import type { CompileState } from './compileState';
 import {
@@ -65,9 +76,35 @@ function defaultDecisionSpec(): NormalizedDecisionSpec {
 function defaultJoinSpec(): NormalizedJoinSpec {
   return { reducer: 'list_append', initialFactory: null };
 }
+// The three database kinds' empty-but-valid specs: every field the generated
+// document declares, at the schema's own default. These are what a database
+// node gets when it is created *without* a starter patch -- the operation is
+// empty on purpose, because "which query" is the user's declaration and Phase
+// 1 reports `db_empty_operation` naming the field until they make it.
+function defaultSqlSpec(): NormalizedSqlSpec {
+  return { query: '', seedSql: '', write: false, note: null };
+}
+function defaultNosqlSpec(): NormalizedNosqlSpec {
+  return { collection: '', operation: 'find', filter: {}, limit: 20, seed: [], note: null };
+}
+function defaultVectorSpec(): NormalizedVectorSpec {
+  return { collection: '', topK: 4, minScore: 0, seed: [], note: null };
+}
 
 function defaultIo() {
   return { inputType: 'str' as const, outputType: 'str' as const };
+}
+
+/** The I/O pair a node of `kind` starts with when no starter patch supplies
+ * one. A database node's pair is *fixed by its kind* (`str -> list[json]`,
+ * models.py) rather than chosen, so the store may know it without asking the
+ * server -- and it must, because a node created with no catalog at all still
+ * has to be a document Phase 1 accepts. The starter's own pair, when present,
+ * overrides this (it is the server's declaration, not this file's copy of it).
+ */
+function defaultIoForKind(kind: NodeKind): NodeIo {
+  if (isDatabaseKind(kind)) return { inputType: 'str', outputType: 'list[json]' };
+  return defaultIo();
 }
 
 function nowIso(): string {
@@ -92,6 +129,47 @@ export type EdgeExtra =
   | { kind: 'fanout'; joinNodeId: string }
   | { kind: 'join' }
   | { kind: 'delegate' };
+
+/** What a new database node is created from: the starter's spec **and** its
+ * io. Both, deliberately -- a database node's I/O pair is mandatory
+ * (`str -> list[json]`) and the catalog is what declares it, so a patch that
+ * carried only the spec could leave behind a node Phase 1 rejects for a
+ * reason the user never typed. `kind` makes the pairing checkable: a SQL spec
+ * cannot be applied to a noSQL node. */
+export type NodeStarterPatch =
+  | { kind: 'sql'; spec: NormalizedSqlSpec; io?: NodeIo }
+  | { kind: 'nosql'; spec: NormalizedNosqlSpec; io?: NodeIo }
+  | { kind: 'vector'; spec: NormalizedVectorSpec; io?: NodeIo };
+
+/**
+ * The patch a new node of `kind` is created from, or `undefined` when the
+ * cached catalog has no usable entry for it.
+ *
+ * `undefined` is the palette's disabled state and nothing else: there is
+ * deliberately no hand-written fallback starter here, because a second copy
+ * of the server's default operation or seed would drift from the file the
+ * generated project is rendered from (the failure mode this project already
+ * documents for `infer_template`).
+ */
+export function starterPatch(
+  kind: DatabaseKind,
+  starters: DatabaseStarterMap | null,
+): NodeStarterPatch | undefined {
+  switch (kind) {
+    case 'sql': {
+      const entry = starters?.sql;
+      return entry ? { kind: 'sql', spec: entry.spec, io: entry.io } : undefined;
+    }
+    case 'nosql': {
+      const entry = starters?.nosql;
+      return entry ? { kind: 'nosql', spec: entry.spec, io: entry.io } : undefined;
+    }
+    case 'vector': {
+      const entry = starters?.vector;
+      return entry ? { kind: 'vector', spec: entry.spec, io: entry.io } : undefined;
+    }
+  }
+}
 
 export interface GraphStoreState {
   // Normalized, not the raw wire type (see `normalizeGraph` in
@@ -125,6 +203,25 @@ export interface GraphStoreState {
    * same transport as `compile`, tracing the workflow node by node. */
   run: RunState;
 
+  // ---- database starter catalog ----
+  // App-scoped, not graph-scoped: the catalog describes what a *kind* can be
+  // created as, so it survives every `loadGraph`/`newGraph` and is fetched
+  // once per session (`loadDatabaseStarters`, wired at app start) with an
+  // explicit, user-triggered retry (`retryDatabaseStarters`). `null` means
+  // "no usable catalog right now": the palette's three database entries are
+  // disabled and the Inspector says why, rather than creating a node whose
+  // operation nothing could fill in.
+  databaseStarters: DatabaseStarterMap | null;
+  databaseStartersStatus: 'idle' | 'loading' | 'ready' | 'unavailable';
+  databaseStartersError: string | null;
+  /** Fetch the catalog unless it is already loading or loaded. Idempotent by
+   * design, so calling it from an app-start effect is safe under React
+   * StrictMode's double mount. */
+  loadDatabaseStarters(): Promise<void>;
+  /** Fetch it again, whatever the current status -- the retry path behind
+   * "Retry" in the palette and the Inspector. */
+  retryDatabaseStarters(): Promise<void>;
+
   // ---- graph lifecycle ----
   // `loadGraph` accepts the wire-shaped `SwarmGraph` (from
   // `api.getGraph`/`api.putGraph`) and normalizes it before storing.
@@ -137,7 +234,7 @@ export interface GraphStoreState {
   selectEdge(id: string | null): void;
 
   // ---- node actions ----
-  addNode(kind: NodeKind, title: string, position: Position): string;
+  addNode(kind: NodeKind, title: string, position: Position, patch?: NodeStarterPatch): string;
   updateNode(id: string, patch: Partial<NormalizedSwarmNode>): void;
   updateNodePosition(id: string, position: Position): void;
   removeNode(id: string): void;
@@ -146,6 +243,11 @@ export interface GraphStoreState {
   addEdge(kind: SwarmEdgeKind, source: string, target: string, extra?: EdgeExtra): string;
   updateEdge(id: string, patch: Partial<SwarmEdge>): void;
   removeEdge(id: string): void;
+  /** Move an existing edge's source or target to a different node, keeping
+   * the edge's kind and syncing the paired spec fields (decision branches,
+   * agent delegatesTo). Returns false and mutates nothing when the move would
+   * violate a kind constraint (branch/delegate source kind) or is a no-op. */
+  reconnectEdge(id: string, source: string, target: string): boolean;
 
   // ---- graph-level fields ----
   setStateFields(fields: StateField[]): void;
@@ -213,6 +315,47 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
   saveRetryCount: 0,
   compile: initialCompileState(),
   run: initialRunState(),
+  databaseStarters: null,
+  databaseStartersStatus: 'idle',
+  databaseStartersError: null,
+
+  async loadDatabaseStarters() {
+    const status = get().databaseStartersStatus;
+    // Fetched once per session: 'loading' covers React StrictMode's second
+    // mount effect, 'ready' covers every later caller. A retry is an explicit
+    // user action (`retryDatabaseStarters`), never an accident of mounting.
+    if (status === 'loading' || status === 'ready') return;
+    await get().retryDatabaseStarters();
+  },
+
+  async retryDatabaseStarters() {
+    set({ databaseStartersStatus: 'loading', databaseStartersError: null });
+    try {
+      const starters = buildDatabaseStarterMap(await api.listDatabaseStarters());
+      if (!starters) {
+        // The route serves all three kinds or 503s, so an incomplete answer is
+        // not something this client can repair -- and it may not guess.
+        set({
+          databaseStarters: null,
+          databaseStartersStatus: 'unavailable',
+          databaseStartersError:
+            'The server returned an incomplete database starter catalog (sql, noSQL and vector are needed).',
+        });
+        return;
+      }
+      set({
+        databaseStarters: starters,
+        databaseStartersStatus: 'ready',
+        databaseStartersError: null,
+      });
+    } catch (err) {
+      set({
+        databaseStarters: null,
+        databaseStartersStatus: 'unavailable',
+        databaseStartersError: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
 
   loadGraph(graph) {
     set({
@@ -252,6 +395,9 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
       programmatic: null,
       decision: null,
       join: null,
+      sql: null,
+      nosql: null,
+      vector: null,
     };
     const graph: NormalizedSwarmGraph = {
       version: 1,
@@ -294,9 +440,15 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
     set({ selectedEdgeId: id, selectedNodeId: null, selectedNodeIds: [] });
   },
 
-  addNode(kind, title, position) {
+  addNode(kind, title, position, patch) {
     const graph = get().graph;
     if (!graph) throw new Error('addNode called with no graph loaded');
+    if (patch && patch.kind !== kind) {
+      // A mismatched patch is a caller bug, not a user action: applying a SQL
+      // starter to a noSQL node would produce a document whose spec and kind
+      // disagree. Loudly, rather than silently dropping it.
+      throw new Error(`addNode: a ${patch.kind} starter cannot be applied to a ${kind} node`);
+    }
     const existingIds = graph.nodes.map((n) => n.id);
     const id = assignNodeId(title, existingIds, graph.nodes.length);
 
@@ -307,11 +459,16 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
       position,
       reads: [] as string[],
       writes: [] as string[],
-      io: defaultIo(),
+      io: patch?.io ?? defaultIoForKind(kind),
       agent: null,
       programmatic: null,
       decision: null,
       join: null,
+      sql: null,
+      nosql: null,
+      vector: null,
+      // Templates are agent-only (`db_template_set`): a database node never
+      // carries one, not even a stale one.
       template: null,
     };
 
@@ -329,6 +486,21 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
       case 'join':
         node = { ...base, kind: 'join', join: defaultJoinSpec() };
         break;
+      case 'sql': {
+        const spec = patch && patch.kind === 'sql' ? patch.spec : defaultSqlSpec();
+        node = { ...base, kind: 'sql', sql: spec };
+        break;
+      }
+      case 'nosql': {
+        const spec = patch && patch.kind === 'nosql' ? patch.spec : defaultNosqlSpec();
+        node = { ...base, kind: 'nosql', nosql: spec };
+        break;
+      }
+      case 'vector': {
+        const spec = patch && patch.kind === 'vector' ? patch.spec : defaultVectorSpec();
+        node = { ...base, kind: 'vector', vector: spec };
+        break;
+      }
     }
 
     set((state) => ({
@@ -535,6 +707,108 @@ export const useGraphStore = create<GraphStoreState>((set, get) => ({
       dirty: true,
       selectedEdgeId: state.selectedEdgeId === id ? null : state.selectedEdgeId,
     }));
+  },
+
+  reconnectEdge(id, source, target) {
+    const graph = get().graph;
+    if (!graph) return false;
+    const edge = graph.edges.find((e) => e.id === id);
+    if (!edge) return false;
+
+    const sourceNode = graph.nodes.find((n) => n.id === source);
+    const targetNode = graph.nodes.find((n) => n.id === target);
+    if (!sourceNode || !targetNode) return false;
+    if (source === target) return false;
+    if (edge.source === source && edge.target === target) return false;
+
+    // Kind constraints: a branch must originate on a decision, a delegate on
+    // an agent. Rejecting here (and returning false) snaps the edge back in
+    // React Flow rather than writing a document Phase-1 review would refuse.
+    if (edge.kind === 'branch' && sourceNode.kind !== 'decision') return false;
+    if (edge.kind === 'delegate' && sourceNode.kind !== 'agent') return false;
+
+    // Duplicate guard: never create a second edge with the same semantic pair.
+    const duplicate = graph.edges.some(
+      (e) =>
+        e.id !== id &&
+        e.kind === edge.kind &&
+        e.source === source &&
+        e.target === target &&
+        (edge.kind !== 'branch' || (e.kind === 'branch' && e.match === edge.match)),
+    );
+    if (duplicate) return false;
+
+    let nodes = graph.nodes;
+    if (edge.kind === 'branch') {
+      // Keep DecisionSpec.branches in sync on either endpoint move.
+      const match = edge.match;
+      if (edge.source !== source) {
+        // Branch moved to a different decision node: relocate the spec entry.
+        nodes = nodes.map((n) => {
+          if (n.id === edge.source && n.kind === 'decision' && n.decision) {
+            const branches =
+              n.decision.branches?.filter(
+                (b) => !(b.match === match && b.targetNodeId === edge.target),
+              ) ?? [];
+            return { ...n, decision: { ...n.decision, branches } };
+          }
+          if (n.id === source && n.kind === 'decision' && n.decision) {
+            const branches = [...(n.decision.branches ?? []), { match, targetNodeId: target }];
+            return { ...n, decision: { ...n.decision, branches } };
+          }
+          return n;
+        });
+      } else {
+        // Same decision, new target: retarget the existing spec entry.
+        nodes = nodes.map((n) => {
+          if (n.id === source && n.kind === 'decision' && n.decision) {
+            const branches = (n.decision.branches ?? []).map((b) =>
+              b.match === match && b.targetNodeId === edge.target
+                ? { ...b, targetNodeId: target }
+                : b,
+            );
+            return { ...n, decision: { ...n.decision, branches } };
+          }
+          return n;
+        });
+      }
+    } else if (edge.kind === 'delegate') {
+      // Keep agent.delegatesTo in sync on either endpoint move.
+      if (edge.source !== source) {
+        nodes = nodes.map((n) => {
+          if (n.id === edge.source && n.kind === 'agent' && n.agent) {
+            const delegatesTo = n.agent.delegatesTo?.filter((d) => d !== edge.target) ?? [];
+            return { ...n, agent: { ...n.agent, delegatesTo } };
+          }
+          if (n.id === source && n.kind === 'agent' && n.agent) {
+            const delegatesTo = [...(n.agent.delegatesTo ?? []), target];
+            return { ...n, agent: { ...n.agent, delegatesTo } };
+          }
+          return n;
+        });
+      } else {
+        nodes = nodes.map((n) => {
+          if (n.id === source && n.kind === 'agent' && n.agent) {
+            const delegatesTo = (n.agent.delegatesTo ?? []).map((d) =>
+              d === edge.target ? target : d,
+            );
+            return { ...n, agent: { ...n.agent, delegatesTo } };
+          }
+          return n;
+        });
+      }
+    }
+
+    const edges = graph.edges.map((e) =>
+      e.id === id ? { ...e, source, target, id: e.id, kind: e.kind } : e,
+    ) as SwarmEdge[];
+
+    set((state) => ({
+      graph: touch({ ...graph, nodes, edges }),
+      mutationRevision: state.mutationRevision + 1,
+      dirty: true,
+    }));
+    return true;
   },
 
   setStateFields(fields) {

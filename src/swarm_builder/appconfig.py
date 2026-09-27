@@ -69,6 +69,7 @@ class AppModelConfig:
     base_url: str | None = None
     api_key: str | None = None
     reasoning_effort: str | None = None
+    max_tokens: int | None = None
 
     @property
     def label(self) -> str:
@@ -139,6 +140,22 @@ def _clean_str(value: object) -> str | None:
     return text
 
 
+def _clean_int(value: object) -> int | None:
+    """Coerce one parsed JSON scalar to a positive ``int`` or ``None``.
+
+    ``bool`` is rejected before the ``int`` branch (``isinstance(True, int)``
+    is ``True``), matching ``_clean_str``'s posture that an ambiguous value in a
+    hand-edited file contributes nothing rather than misparsing. The positivity
+    bound is the settings screen's own bound restated here as a last line of
+    defence: ``0``/negative has no meaning for an output budget.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
 def load_config(path: Path | None = None) -> AppConfig | None:
     """Read the application's model settings.
 
@@ -180,6 +197,7 @@ def load_config(path: Path | None = None) -> AppConfig | None:
                 base_url=_clean_str(raw_model.get("baseUrl")),
                 api_key=_clean_str(raw_model.get("apiKey")),
                 reasoning_effort=_clean_str(raw_model.get("reasoningEffort")),
+                max_tokens=_clean_int(raw_model.get("maxTokens")),
             )
 
     # A missing or non-boolean `dryRun` is "off": an ambiguous value must not
@@ -260,6 +278,9 @@ def validate_model_config(model: AppModelConfig) -> list[str]:
         # line in an artefact the user ships.
         problems.append("the model id must not contain line breaks or control characters")
 
+    if model.max_tokens is not None and not (256 <= model.max_tokens <= 200_000):
+        problems.append("max output tokens must be between 256 and 200000")
+
     if model.base_url is not None and _has_control_chars(model.base_url):
         problems.append("the base URL must not contain line breaks or control characters")
 
@@ -337,6 +358,7 @@ def apply_update(
     api_key: str | None = None,
     clear_api_key: bool = False,
     reasoning_effort: str | None = None,
+    max_tokens: int | None = None,
 ) -> AppModelConfig:
     """Merge a settings-screen submission onto the stored configuration.
 
@@ -375,6 +397,7 @@ def apply_update(
         base_url=cleaned_base_url,
         api_key=resolved_key,
         reasoning_effort=_clean_str(reasoning_effort),
+        max_tokens=_clean_int(max_tokens),
     )
 
 
@@ -409,6 +432,7 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
             "baseUrl": cfg.model.base_url,
             "apiKey": cfg.model.api_key,
             "reasoningEffort": cfg.model.reasoning_effort,
+            "maxTokens": cfg.model.max_tokens,
         }
 
     payload = json.dumps(document, indent=2, sort_keys=False) + "\n"

@@ -1,0 +1,25 @@
+# --- swarm:db-kind-imports ---
+from $package.repositories.vector import InMemoryVectorRepository, VectorRepository
+
+# --- swarm:db-kind-getters ---
+def get_vector_repository(
+    seed_path: Path, collection: str | None = None
+) -> VectorRepository:
+    """The vector repository for one seed file: mock by default, Qdrant when live.
+
+    ``collection`` is the node's declared collection, which the mock ignores: a
+    mock instance *is* its one collection, keyed by the seed file's content.
+    Live mode honours it (falling back to ``SWARM_VECTOR_COLLECTION``), because
+    searching the wrong collection there would return the wrong documents with
+    no error at all.
+    """
+    if db_mode() == LIVE:
+        from $package.repositories.vector import QdrantRepository
+
+        return QdrantRepository(
+            os.environ["SWARM_VECTOR_DSN"],
+            _live_collection(collection, "SWARM_VECTOR_COLLECTION"),
+        )
+    return _instance(
+        ("vector", seed_key(seed_path)), lambda: InMemoryVectorRepository(seed_path)
+    )

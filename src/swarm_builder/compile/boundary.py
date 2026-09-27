@@ -63,9 +63,13 @@ _EXCLUDED_FILE_SUFFIXES = (".pyc", ".pyo")
 
 #: File names excluded for the same reason as the directories above:
 #: Phase 5's ``uv sync`` writes a lockfile into the project directory,
-#: and the fill agent has no tool that could create one.
+#: and the fill agent has no tool that could create one. The ownership
+#: marker (``.swarm-project.json``) is likewise server-written metadata --
+#: the fill agent's only writer is marker-confined to ``steps/`` -- so it
+#: is excluded too, which also keeps a marker rewrite on graph rename from
+#: ever reading as a boundary event.
 #:
-#: Omitting this made the documented fill retry structurally dead. The
+#: Omitting the lockfile made the documented fill retry structurally dead. The
 #: retry re-runs Phase 3 -> 4 -> 5 against the baseline captured at the
 #: end of Phase 2, so on the second pass the lockfile Phase 5 had just
 #: written registered as ``unexpected_new_file`` and the compile failed
@@ -73,7 +77,7 @@ _EXCLUDED_FILE_SUFFIXES = (".pyc", ".pyo")
 #: never touched, instead of the dry-run failure that triggered the
 #: retry. Every phase-5-failure retry, which is the case the retry
 #: exists for, ended that way.
-_EXCLUDED_FILE_NAMES = frozenset({"uv.lock"})
+_EXCLUDED_FILE_NAMES = frozenset({"uv.lock", ".swarm-project.json"})
 
 
 class BoundaryScaffoldError(Exception):

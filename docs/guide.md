@@ -5,9 +5,9 @@
 > [repository README](../README.md).
 
 A local-first web app for building PydanticAI agent workflows **visually**: you
-drag agent and programmatic nodes onto a canvas, connect them, describe each
-node's intent in plain English, and click **Compile**. Swarm Builder fills the
-gaps with a PydanticAI coding agent and produces a runnable
+drag agent, programmatic and database nodes onto a canvas, connect them,
+describe each node's intent in plain English, and click **Compile**. Swarm
+Builder fills the gaps with a PydanticAI coding agent and produces a runnable
 [`pydantic-graph`](https://ai.pydantic.dev/graph/) project on disk — then proves
 it imports and runs.
 
@@ -601,7 +601,7 @@ PydanticAI project into a LangGraph project under
 | # | Phase | What it does |
 |---|---|---|
 | 6 | `lg_scaffold` | Deterministic. Emits `pyproject.toml` (pinned `langgraph` 1.2.12, `langchain` 1.4.2, `langchain-core` 1.6.4, plus the LangChain partner package for the inherited route), `state.py` (a `TypedDict` with a `payload` channel, the canvas state fields, and one reducer channel per join), `context.py` (a `Runtime` context carrying the LangChain chat model), `graph.py` (the `StateGraph` wiring), one `nodes/<id>.py` per canvas node, and `validate/dry_run.py` with a Mermaid golden. |
-| 7 | `lg_convert` | The one model call. A conversion agent reads each filled `steps/<id>.py` of the PydanticAI project and writes the equivalent body into the marker region of `nodes/<id>.py`. Only `programmatic` bodies need converting: agent, decision and join nodes are complete templates. Retried once if 8 or 9 fails. |
+| 7 | `lg_convert` | The one model call. A conversion agent reads each filled `steps/<id>.py` of the PydanticAI project and writes the equivalent body into the marker region of `nodes/<id>.py`. Only `programmatic` bodies need converting: agent, decision, join and the three database kinds are complete templates. Retried once if 8 or 9 fails. |
 | 8 | `lg_boundary` | The same two-tier boundary check as Phase 4, over `nodes/`. |
 | 9 | `lg_validate` | `uv sync`, keyless import, and the project's own dry run: Mermaid golden, node set, and a full `ainvoke` against a keyless fake chat model. |
 
@@ -629,6 +629,245 @@ run command. **Run** always executes the PydanticAI project. Under
 `SWARM_FAKE_FILL=1` the conversion is a deterministic stub, so the whole
 nine-phase compile works with no credentials.
 
+## Database nodes
+
+Three kinds read from a database: **SQL**, **NoSQL** and **Vector**. Each is a
+real graph step — it takes the upstream node's value as its input, runs in the
+middle of the workflow, and returns rows or documents that anything downstream
+can consume, including a `join`.
+
+**A database node works with no server, no driver and no credential.** Drop one
+on the canvas, compile, press Run: the step answers from a deterministic
+**mock** — an in-memory SQLite database seeded from the node's own seed SQL,
+an in-memory document store, or an in-memory vector index with a local hash
+embedder. Going live is one environment variable, that engine's DSN and that
+engine's opt-in dependency extra; see [Going live](#going-live).
+
+**No model writes a database node's code.** The default operation and the
+example data come from a starter template the server serves, the step body is
+emitted from the fields you declare in the Inspector, and the operation
+constant sits *outside* the marker region a fill agent may edit. A database
+step is therefore complete as soon as Phase 2 scaffolds it, and a
+`SWARM_FAKE_FILL=1` compile produces exactly the same database step as a real
+one.
+
+### Add a node from the palette
+
+1. Open the palette and pick **SQL**, **NoSQL** or **Vector**. The node lands
+   with its kind's starter already applied: a default operation, example data,
+   and the fixed port pair `str` in → `list[json]` out.
+2. Wire it like any other node. Whichever node's value should supply the
+   parameters becomes its source; its own output is a list of rows, so a `join`
+   can merge it without losing anything.
+3. Select it and edit the operation under **Database** in the Inspector.
+4. Compile — or press **Run**, which compiles first when it has to. The step
+   reads the mock immediately.
+
+The starter is copied into the **graph document** when the node is created, and
+not substituted at compile time, so the Inspector always shows what will
+actually run and a saved document is self-contained. **Reset to example** in
+the Inspector restores the spec *and* the port pair from the starter, which by
+construction clears any drift from it.
+
+The three palette entries need the starter catalog
+(`GET /api/database-starters`, fetched once when the app starts and cached).
+While that request cannot be served, the three entries are **disabled with an
+explanatory hint**, rather than creating a node the server could not make
+compilable.
+
+What each starter gives you out of the box:
+
+| Kind | Example domain | Default operation | Seed |
+|---|---|---|---|
+| **SQL** | `customers(id, name, city)`, `orders(id, customer_id, total)` | `SELECT o.id, o.total FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = :input ORDER BY o.id` | 3 customers and 3 orders, in `seedSql` |
+| **NoSQL** | the `tickets` collection | `find` with `filter = {"status": "$input"}` and `limit = 20` | 3 ticket documents |
+| **Vector** | the `product_docs` collection | `top_k = 4`, `min_score = 0.0` | 4 product blurbs |
+
+The default operation and the default seed agree by construction, so a fresh
+node compiles and its dry run passes with no edit at all.
+
+### Edit the operation in the Inspector
+
+A database node's spec lives in the graph document and is what the compile
+reads; the Inspector is the only place it is meant to be edited. Agent fields
+(Template, Instructions, Tools, Delegates to) are hidden for a database node,
+and the Database fields are hidden for every other kind.
+
+**SQL** — `SqlSpec`:
+
+| Field | Meaning |
+|---|---|
+| `query` | The statement the step runs. `:name` placeholders are the declaration syntax: `:input` binds the node's own input, and with a `json` input each key of the dict binds under its own name. |
+| `seedSql` | The schema and rows the **mock** loads into its in-memory SQLite database. Required: it is what makes the mock deterministic. |
+| `write` | Off by default. Turned on, the step calls the repository's write path instead of its read path, and the node can no longer be attached to an agent as a tool. |
+| `note` | Free text. It is emitted as a comment above the query constant and shown as the field's help text. |
+
+**NoSQL** — `NosqlSpec`: `collection`, `operation`
+(`find`, `find_one`, `count` or `insert_one`), `filter` (a JSON object, which
+may carry the `"$input"` sentinel), `limit` (default 20), `seed` (a JSON array
+of documents) and `note`. The Inspector validates the JSON before writing it to
+the store, so a document with a syntax error never reaches the compile.
+
+**Vector** — `VectorSpec`: `collection`, `top_k` (default 4), `min_score`
+(default `0.0`, on a cosine score in `[-1, 1]`, where `0.0` means "no
+threshold"), `seed` (a JSON array of `{"id", "text", "metadata"}` documents)
+and `note`.
+
+### How parameters bind
+
+The upstream node's value arrives as the step's input and is the *only*
+parameter source — nothing else is substituted. `str` and `list[str]` inputs
+bind under the name `input`; a `json` input is a `dict`.
+
+| Kind | `input: str` | `input: json` | `input: list[str]` | `input: list[json]` |
+|---|---|---|---|---|
+| **SQL** | binds `{"input": <value>}`; the query must contain `:input` | the dict's keys bind directly (`:customer`), and `:input` additionally binds the whole dict; at least one placeholder is required | a single `:input` placeholder expands to `:input_0, :input_1, …`, bound as a sequence (SQLite cannot bind a list to one placeholder) | **rejected** |
+| **NoSQL** | any filter value equal to the sentinel `"$input"` is replaced by the value | the input dict is merged over the filter's top level | the sentinel in an `$in` value position is replaced by the list | **rejected** |
+| **Vector** | the value is the query text | **rejected** | **rejected** | **rejected** |
+
+A rejected cell is a Phase-1 error (`db_input_type_unsupported`), so the
+mismatch is refused before anything is written to disk. Phase 1 also refuses a
+SQL query whose `:name` placeholders do not match what the declared input type
+supplies (`db_placeholder_mismatch`), an empty operation, collection or seed
+(`db_empty_operation`), a seed that does not parse (`db_seed_invalid`), and a
+port pair other than the kind's mandatory `str → list[json]` (or
+`json → list[json]` for a JSON-parameterized SQL/NoSQL node) —
+`db_op_io_mismatch`.
+
+### Use a database node as a tool
+
+An agent node can use a database node's **read** operation as a tool by naming
+it in the agent's Tools list, in the namespaced form `<kind>:<node_id>`. The
+relevant part of such a node's document is:
+
+```json
+{ "id": "assistant", "kind": "agent", "title": "Assistant",
+  "tools": ["web_search", "vector:product_docs"] }
+```
+
+That emits one tool into the agent's own module, named `<node_id>_search` for
+a vector node and `<node_id>_query` for a SQL or NoSQL node. The tool takes the
+database node's **declared input type** and returns its **declared output
+type**, and it can run exactly the read operation the node declares — nothing
+else. So:
+
+- the agent cannot author a statement. **There is no free-form or text-to-SQL
+  tool in v1**, which is what stops a prompt injection from reaching the
+  database: the worst an agent can do is parameterize the query you wrote;
+- a write-mode node cannot be a tool. Naming a node whose `write` is on (or
+  whose operation is `insert_one`) is refused by Phase 1
+  (`db_write_as_tool`);
+- an entry naming a missing node, or a node of another kind, is refused too
+  (`db_tool_unknown_node`), and the message names the entry;
+- the Tools fieldset lists one database entry per database node in the graph,
+  and says so when a node is in write mode, so the refusal above is visible in
+  the Inspector rather than only at compile time.
+
+### Going live
+
+Live mode is selected per run by one environment variable, and reads the DSN
+from another. Both are read by the **generated project**, not by Swarm Builder:
+in `repositories/__init__.py`, the per-kind factory
+(`get_sql_repository()`, `get_document_repository()`,
+`get_vector_repository()`) returns the mock when `SWARM_DB_MODE` is unset or
+`mock`, and that engine's live adapter when it is `live`. There is no graph
+edit involved — the same document reads the real database.
+
+```bash
+cd workspace/projects/<graphId>
+export UV_CACHE_DIR=/path/to/writable/cache
+
+export SWARM_DB_MODE=live
+export SWARM_SQL_DSN="postgresql://user:password@host:5432/dbname"
+
+uv sync --extra live-sql     # that engine's driver; a plain uv sync installs none
+uv run python validate/dry_run.py
+```
+
+| Kind | Live adapter | Driver | Opt-in extra | DSN variable |
+|---|---|---|---|---|
+| **SQL** | `PostgresRepository`, in `repositories/sql.py` | `psycopg` 3 | `live-sql` (`psycopg[binary]>=3.2`) | `SWARM_SQL_DSN` |
+| **NoSQL** | `MongoRepository`, in `repositories/nosql.py` | `pymongo` | `live-nosql` (`pymongo>=4.9`) | `SWARM_NOSQL_DSN` |
+| **Vector** | `QdrantRepository`, in `repositories/vector.py` | `qdrant-client` | `live-vector` (`qdrant-client>=1.12`) | `SWARM_VECTOR_DSN` |
+
+- It is **per engine the graph uses**: a graph with a SQL node and a vector
+  node needs both `uv sync --extra live-sql --extra live-vector` and both DSNs.
+  The generated project declares only the extras for the kinds in the graph,
+  and its `.env.example` carries only those engines' keys (appended to the
+  model lines, never replacing them).
+- **The DSN key is fixed per engine**: `SWARM_SQL_DSN`, `SWARM_NOSQL_DSN` and
+  `SWARM_VECTOR_DSN`. Each is written into the generated `.env.example` (only
+  for the kinds the graph uses) and reported by `GET /api/database-starters`
+  in that entry's `envVars`.
+- **An unknown `SWARM_DB_MODE` raises** rather than falling back to the mock:
+  `SWARM_DB_MODE=life` fails naming the accepted values. A workflow that
+  quietly answered from example data on a production run would be worse than a
+  failed step, so live mode never degrades either — a missing DSN names the
+  variable to set, and a missing driver names
+  `uv sync --extra live-<kind>`.
+- The generated `README.md` repeats all of it: the file to edit (the repository
+  seam, under `src/swarm_workflow/repositories/`), every variable, and each
+  kind's exact `uv sync --extra live-<kind>` command.
+- **Live vector search also needs a real `Embedder`.** The mock index embeds
+  text with `HashEmbedder` (256 dimensions, hashed character n-grams, no model
+  download, identical output across processes) and cosine similarity. That is
+  adequate to prove the wiring, not to retrieve anything meaningful: the live
+  adapter takes a user-supplied `Embedder`, whose Protocol lives in
+  `src/swarm_workflow/repositories/embedding.py`, so pass your own when you go
+  live.
+
+**A Run uses the server's environment.** The Run button executes the generated
+project as a subprocess with the server's environment passed through, so
+`SWARM_DB_MODE` and the DSN have to be exported for the process that started
+Swarm Builder — not only in a shell you happen to compile from.
+
+### What the mock does, and what it does not
+
+The mock is a real implementation of the same `Protocol` the live adapter
+implements, selected by the same factory — never an `if mock:` branch inside
+the adapter — so the mock cannot rot into an approximation of the live path.
+Its semantics and its limits:
+
+| Kind | The mock | Limits |
+|---|---|---|
+| **SQL** | In-memory `sqlite3` (`:memory:`), seeded with `seedSql`. `query()` returns a `list[dict]` with column names from the cursor, in the query's own order. | Nothing is written to disk, and the database exists only for the life of the process. |
+| **NoSQL** | In-memory documents from `seed`. `find` supports equality, dotted paths and `$eq $ne $gt $gte $lt $lte $in $regex $exists`, plus top-level `$and`/`$or`; an unsupported operator raises `NotImplementedError` naming it, rather than silently matching everything. `find_one`, `count` and `insert_one` complete the surface. | `aggregate` is deliberately not in v1. `insert_one` writes are ephemeral. |
+| **Vector** | An in-memory index over `seed`, searched by cosine similarity and sorted by `(-score, id)`, so ties are stable. | The `HashEmbedder` is a lexical stand-in, not an embedding model — see [Going live](#going-live). |
+
+Two further properties worth knowing:
+
+- **Two database nodes cannot be wired directly to each other.** A database
+  node's output is always `list[json]` (rows), and `list[json]` is never a valid
+  database *input* — the input is the parameter its operation binds, not rows. So
+  a database node feeding another database node is a `port_type_mismatch`; put a
+  step between them that reshapes the rows into the value the second node's
+  operation expects.
+- **One mock instance per seed.** Two nodes of the same kind with the same seed
+  share one in-memory database, so a write in an earlier step is visible to a
+  later node; two nodes with *different* seeds get independent databases, so
+  neither node's seed is silently ignored. Phase 1 warns about the second case
+  (`db_separate_mock_instances`) because the two nodes cannot see each other's
+  writes.
+- **Nothing persists.** Mock state lives in the process, so a second run starts
+  from the seed again. Persistence is what live mode is for.
+
+### What a database node cannot do
+
+- **Its read path is enforced, not documented.** The lexical check and the
+  SQLite authorizer behind it are emitted code, and a write happens only from a
+  node you marked `write: true` — see
+  [the guarantee](#the-database-layer-is-mock-first-and-never-model-written).
+- **An agent cannot author a statement.** No free-form or text-to-SQL tool
+  exists in v1: an agent's database tool can only parameterize the operation you
+  declared.
+- **No credentials live in the app.** A graph document carries no DSN, no
+  password and no key, so it stays shareable; connection details live in the
+  generated project's environment, and the live drivers are opt-in extras, so a
+  keyless compile and the keyless dry run never import one.
+- **There is no schema introspection.** No table-listing or schema-exploring
+  helper: the query you declare is the query that runs. `aggregate` is out of
+  scope for NoSQL in v1 too, and nothing the mock writes outlives the process.
+
 ## Running the tests
 
 ```bash
@@ -652,11 +891,12 @@ pnpm --dir web test
 uv run python scripts/generate_web_types.py
 ```
 
-Current counts on this checkout: **323 Python tests** (23 of them `slow`) and
-**62 Vitest tests** across 9 files. Measured just now: `uv run pytest -q`
-takes ~72 s and reports `323 passed`; `uv run pytest -q -m "not slow"` takes
-~30 s and reports `300 passed, 23 deselected`; `pnpm --dir web test` reports
-`62 passed (62)` in under 2 s; `pnpm --dir web build` succeeds. The `slow`
+Current counts on this checkout: **1090 Python tests** (40 of them `slow`) and
+**213 Vitest tests** across 21 files. Measured just now: `uv run pytest -q`
+takes ~185 s and reports `1090 passed`; `uv run pytest -q -m "not slow"` takes
+~87 s and reports `1050 passed, 40 deselected`; `pnpm --dir web test` reports
+`213 passed (213)` across `21 passed (21)` files in under 3 s;
+`pnpm --dir web build` succeeds. The `slow`
 marker is registered in `pyproject.toml` under `[tool.pytest.ini_options]`, so
 there is no `PytestUnknownMarkWarning`; its own description is
 `exercises uv sync + a real subprocess`.
@@ -681,12 +921,17 @@ root with `SWARM_WORKSPACE`):
 
 ```
 workspace/projects/<graphId>/
-  pyproject.toml            deps = the route's extras + template deps + programmatic `needs`
+  pyproject.toml            deps = the route's extras + template deps + programmatic
+                            `needs`, plus one `live-<kind>` optional extra per
+                            database kind the graph uses
   .python-version           pins the interpreter the codegen suite validates against
-  README.md                 the inherited route and how to run this project
+  README.md                 the inherited route, how to run this project, and -- for a
+                            graph with a database node -- a "Database nodes" section
+                            naming the file to edit and the exact live commands
   .env.example              the route's environment lines: SWARM_MODEL for a
                             known-name route, or SWARM_MODEL + SWARM_BASE_URL
-                            + SWARM_API_KEY_ENV for a custom-baseURL route
+                            + SWARM_API_KEY_ENV for a custom-baseURL route;
+                            plus SWARM_DB_MODE and the used engines' DSN keys
   src/swarm_workflow/
     __init__.py
     state.py                @dataclass State, from the canvas's stateFields
@@ -694,6 +939,18 @@ workspace/projects/<graphId>/
     graph.py                GraphBuilder wiring -- generated, never model-written
     steps/<node_id>.py      one module per step node, with marker regions
     agents/<node_id>.py     one agent factory per agent node
+    repositories/           only when the graph has a database node:
+      __init__.py             the get_*_repository() factories: the mock/live
+                              seam, and the instance cache
+      portshape.py            row-to-port coercion, placeholder rewrites
+      sql.py                  SqlRepository Protocol, SqliteRepository (mock),
+                              PostgresRepository (live)
+      nosql.py                DocumentRepository Protocol, the in-memory and
+                              Mongo implementations
+      vector.py               VectorRepository Protocol, the in-memory and
+                              Qdrant implementations
+      embedding.py            the Embedder protocol + HashEmbedder (vector only)
+      seed/<node_id>.sql|.json  one seed fixture per database node
   validate/
     dry_run.py              the project's own TestModel-injected gate
     golden_render.txt       the expected graph.render() output, captured at scaffold time
@@ -705,6 +962,16 @@ workspace/projects/<graphId>/
 `validate/` and `run/` are regenerated on every recompile and are never model-written.
 Only the marker regions in `steps/*.py` and `agents/*.py` are editable by the
 fill agent.
+
+**Everything database-related is gated on the graph actually using a database
+node.** When it does not, no `repositories/` module, no seed fixture, no
+optional-dependency extra, no `.env.example` line, no generated-README section
+and no dry-run assertion is emitted — a graph without a database node compiles
+to exactly the project it compiled to before the three kinds existed. When it
+does, `repositories/**` is regenerated by the scaffolder and is deliberately
+**not** a path the fill agent may write; a hand-edit to it fails the boundary
+check like any other scaffolded file, and the fill agent's `write_region`
+refuses it.
 
 ### Running it standalone
 
@@ -743,6 +1010,12 @@ a known-name route writes `SWARM_MODEL=<prefix>:<model>` (here,
 `SWARM_MODEL`, `SWARM_BASE_URL` and `SWARM_API_KEY_ENV`. Scaffolding always
 creates the file, so a recompile cannot leave a stale one behind.
 
+When the graph uses a database node, `SWARM_DB_MODE` and the DSN keys of the
+engines it actually uses are **appended** to those model lines (never replacing
+them), and the generated `README.md` gains a **Database nodes** section naming
+the exact file to edit and the exact `uv sync --extra live-<kind>` command for
+each kind in the graph. A graph with no database node gets neither.
+
 ### Configuration reference
 
 | Variable | Default | Purpose |
@@ -759,6 +1032,7 @@ creates the file, so a recompile cannot leave a stale one behind.
 | `SWARM_FAKE_FILL` | *(none)* | `1` selects the deterministic stub fill instead of the model: no credentials needed. Also forces the in-app **Dry run mode** switch on (and locks it). |
 | `SWARM_FAKE_GENERATE` | *(none)* | `1` replaces the model in **Describe → generate** with a deterministic sentence-per-step draft. Also forces dry run on. |
 | `SWARM_RUN_TEST_MODEL` | *(none)* | `1` makes a **Run** execute the generated project against a keyless `TestModel` instead of the real model — for exercising the run plumbing, never for real output. Also forces dry run on. |
+| `SWARM_DB_MODE` | `mock` | Read by a **generated project**, not by the app: `mock` (the default when unset or empty) selects the in-memory repository, `live` selects that engine's live adapter — see [Going live](#going-live). An unrecognized value raises instead of falling back. Because a **Run** passes the server's environment through, exporting it for the server is what changes what a Run reads. |
 
 `.env.example` is a copy-pasteable starting point: copy it to `.env` and the
 console script loads it at startup. Only `swarm-builder` (and `docker
@@ -768,7 +1042,7 @@ compose`) read `.env`; a bare `uvicorn swarm_builder.main:app` does not.
 
 ## Guarantees the compile relies on
 
-Three properties that are load-bearing rather than incidental. Each has been
+Four properties that are load-bearing rather than incidental. Each has been
 verified against this checkout, and each is the kind of thing a reader would
 otherwise have to reconstruct from the code.
 
@@ -802,7 +1076,7 @@ and stub fillers cannot disagree about it.
 
 ### The `json` port type
 
-`json` is one of the three legal `PortType` values, and it goes through the
+`json` is one of the four legal `PortType` values, and it goes through the
 shared tables in `models.py` like any other — **a `PortType` is never
 interpolated verbatim into generated source**, because the label `json` is not
 a valid Python annotation:
@@ -812,6 +1086,12 @@ a valid Python annotation:
 | `str` | `str` | *(none)* |
 | `list[str]` | `list[str]` | *(none)* |
 | `json` | `dict[str, Any]` | `from typing import Any` |
+| `list[json]` | `list[dict[str, Any]]` | `from typing import Any` |
+
+`list[json]` is the fourth, and the database nodes are why it exists: a result
+set is a *list of rows*, and coercing it to `json` or to a newline-joined `str`
+would make rows lossy the moment they cross an edge — including through a
+`join`, which is where a database read tends to be consumed.
 
 Two defects in the `json` path shipped once and are now fixed, both covered by
 the `json_ports` fixture:
@@ -841,6 +1121,40 @@ Python against the project rather than by scaffolding it. A genuinely
 unexpected file is still caught: verified by writing `uv.lock` and
 `__pycache__/x.pyc` next to a baseline and getting zero violations, then
 adding `notes.txt` and getting exactly `unexpected_new_file (notes.txt)`.
+
+### The database layer is mock-first, and never model-written
+
+A database node's safety properties are emitted code, not documentation. Four
+things hold, on both compile targets:
+
+- **The code is deterministic.** No model call produces a query, a seed or a
+  repository file: the operation and the seed are declared in the graph
+  document, and the step body is rendered from them. Database kinds are
+  deliberately absent from `FILLABLE_NODE_KINDS` (which stays
+  `{"programmatic"}`) and from the LangGraph conversion targets, so a database
+  body is never a fill target on either emission path.
+- **The read path is guarded, not merely checked.** The SQL mock arms a SQLite
+  `set_authorizer` that denies every action other than `SELECT`/`READ` while
+  `query()` runs, after `PRAGMA query_only = ON` and before any statement is
+  executed; the lexical `assert_read_only` in front of it exists to produce a
+  good error message, because a recursive `WITH … INSERT … RETURNING` passes
+  any lexical check. The live adapters reuse the guards and set a read-only
+  session or transaction.
+- **No agent can author a statement.** An agent's database tool can only bind
+  the operation its node declares, and a write-mode node cannot be attached as
+  a tool at all, so prompt injection has no path to the database. Free-form /
+  text-to-SQL tools are deliberately out of scope in v1 — the seam a future
+  read-only `sql:<id>:explore` tool would use.
+- **Credentials are never in the app.** The graph document carries no DSN and
+  no secret: the connection details live in the generated project's
+  environment, and the live drivers are opt-in extras, so the keyless compile
+  and the dry run cannot import one. A generated project's `.env.example` names
+  variables; it never carries a value.
+
+The limits that follow from the mock are stated with it, in
+[what the mock does, and what it does not](#what-the-mock-does-and-what-it-does-not):
+in-memory and ephemeral, one instance per seed, no `aggregate`, no schema
+introspection, and a lexical hash embedder rather than an embedding model.
 
 ---
 
@@ -1339,6 +1653,43 @@ curl -s http://127.0.0.1:8420/api/models | python3 -m json.tool
 
 An id that is genuinely newer than the installed `pydantic-ai` is fine to
 leave: the warning is the only consequence, and the compile succeeds.
+
+### A database step fails as soon as the graph goes live
+
+**Symptom** — with `SWARM_DB_MODE=live`, a run (or a *manual* `uv run python
+validate/dry_run.py`) fails on a database step, and the message names one of
+three things: an unsupported `SWARM_DB_MODE` value, a missing DSN variable, or
+a driver module that cannot be imported (`psycopg`, `pymongo`,
+`qdrant_client`). **A compile is unaffected**: the compile gate strips
+`SWARM_DB_MODE` and every database variable from its subprocesses, so the gate is
+always keyless *and* in mock mode even while your shell is set up for a live
+database — otherwise going live would have made recompiling impossible.
+
+**Cause** — three separate refusals, and **none of them falls back to the
+mock**:
+
+| Message names | Cause | Fix |
+|---|---|---|
+| The accepted `SWARM_DB_MODE` values | A value other than `mock`/`live`, e.g. the typo `life`. | Set `SWARM_DB_MODE=live`, or unset it for the mock. |
+| The engine's DSN variable | Live mode with that variable unset. | Set `SWARM_SQL_DSN`, `SWARM_NOSQL_DSN` or `SWARM_VECTOR_DSN` — see [Going live](#going-live). |
+| `uv sync --extra live-<kind>` | That engine's optional dependency is not installed. | `uv sync --extra live-sql`, `--extra live-nosql`, `--extra live-vector`. |
+
+**Fix** — from the failing project's own directory, set the two variables and
+install the extra, then retry. This is designed behaviour rather than a bug: a
+workflow that quietly answered from example data on a production run, or
+silently used the mock because a value was misspelled, would be a worse
+surprise than a failed step.
+
+Two details that explain most of these:
+
+- **A plain `uv sync` installs no driver, on purpose.** The generated project's
+  `pyproject.toml` declares each engine's driver as an optional extra, so a
+  keyless compile and the Phase-5 gate never install one; going live is what
+  adds it.
+- **A Run uses the server's environment.** `SWARM_DB_MODE` and the DSN must be
+  exported for the process that started Swarm Builder, not only in a shell you
+  happened to run `uv sync` from. The Run subprocess inherits the server's
+  environment; it is not given a per-run database configuration of its own.
 
 ### Concurrent compiles return `409`
 

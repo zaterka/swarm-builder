@@ -21,6 +21,10 @@ _RETURN_EXPRESSIONS: dict[PortType, str] = {
     "str": "str(inputs)",
     "list[str]": "[str(inputs)]",
     "json": '{"input": str(inputs)}',
+    # A list of rows, which is what a `list[json]` port promises its consumer:
+    # one mapping per element, so `as_port(..., "list[json]")` and the generated
+    # `graph.py` annotation both accept it.
+    "list[json]": '[{"input": str(inputs)}]',
 }
 
 _BODY_INDENT = "    "

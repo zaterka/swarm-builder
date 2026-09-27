@@ -32,6 +32,7 @@ from swarm_builder.compile.review import review
 from swarm_builder.main import create_app
 from swarm_builder.routes import compile as compile_routes
 from swarm_builder.slugify import slugify_titles
+from swarm_builder.templates.database import get_database_entry
 
 pytestmark = pytest.mark.anyio
 
@@ -276,6 +277,143 @@ def test_state_fields_get_dataclass_safe_defaults() -> None:
     graph = materialize(draft, "g")
     defaults = {f.name: f.default for f in graph.state_fields}
     assert defaults == {"topic": '""', "items": "None", "meta": "None"}
+
+
+def test_state_fields_get_a_default_for_the_new_list_json_port() -> None:
+    """§5 item 4: the only consumer of ``STATE_FIELD_DEFAULTS`` is this module, so a
+    drafted ``list[json]`` state field gets a literal source that is safe as a
+    dataclass default (``[]`` would be one shared mutable value)."""
+    draft = _linear_draft()
+    draft.state_fields = [DraftStateField(name="rows", type="list[json]")]
+    graph = materialize(draft, "g")
+    defaults = {f.name: f.default for f in graph.state_fields}
+    # The linear draft's own implied fields are still there; the new port's row is
+    # what this test is about.
+    assert defaults["rows"] == "None"
+
+
+# ---------------------------------------------------------------------------
+# Database nodes in a draft (PLAN-DB-NODES.md §4.6)
+# ---------------------------------------------------------------------------
+
+
+def _database_draft(tools: list[str] | None = None) -> GraphDraft:
+    """One programmatic step, one NoSQL node, one agent that may attach it."""
+    return GraphDraft(
+        name="Ticket triage",
+        nodes=[
+            DraftNode(title="Intake", kind="programmatic", intent="Normalize the request."),
+            DraftNode(title="Tickets", kind="nosql", intent="Find the tickets to answer."),
+            DraftNode(
+                title="Answer",
+                kind="agent",
+                intent="Draft the reply.",
+                template="chat",
+                input_type="list[json]",
+                tools=["Tickets"] if tools is None else tools,
+            ),
+        ],
+        edges=[
+            DraftEdge(source="Intake", target="Tickets"),
+            DraftEdge(source="Tickets", target="Answer"),
+        ],
+    )
+
+
+def test_a_drafted_database_node_is_materialized_from_its_starter() -> None:
+    """§4.6: the draft chooses only *that* a database node exists and which kind it
+    is. Its spec and its mandatory I/O pair come from the kind's starter, so no model
+    call ever authors a query, a seed or a port pair."""
+    graph = materialize(_database_draft(), "g-db")
+    node = next(node for node in graph.nodes if node.kind == "nosql")
+    assert (node.io.input_type, node.io.output_type) == ("str", "list[json]")
+    assert node.nosql is not None
+    entry = get_database_entry("nosql")
+    assert node.nosql.model_dump() == entry.starter_spec.model_dump()
+    assert node.nosql is not entry.starter_spec  # a copy, not the catalog's object
+    assert node.template is None
+    assert review(graph).ok
+
+
+def test_a_draft_cannot_carry_an_operation_field_for_a_database_node() -> None:
+    """§1.3's boundary, asserted directly: ``DraftNode`` has no query/seed/collection
+    field, so the model has nowhere to put one even if it tried."""
+    fields = set(DraftNode.model_fields)
+    assert not fields & {
+        "query",
+        "seed_sql",
+        "seed",
+        "collection",
+        "operation",
+        "filter",
+        "top_k",
+        "min_score",
+    }
+    assert "tools" in fields
+
+
+def test_a_drafted_database_node_ignores_the_drafts_own_ports_and_template() -> None:
+    """A drafted port pair or template on a database node is dropped: the ports are
+    the kind's mandatory pair (Phase 1 rejects anything else) and templates are
+    agent-only (Phase 1 rejects ``db_template_set``)."""
+    draft = _database_draft()
+    draft.nodes[1] = draft.nodes[1].model_copy(
+        update={"input_type": "list[str]", "output_type": "json", "template": "chat"}
+    )
+    graph = materialize(draft, "g-db2")
+    node = next(node for node in graph.nodes if node.kind == "nosql")
+    assert (node.io.input_type, node.io.output_type) == ("str", "list[json]")
+    assert node.template is None
+
+
+def test_a_drafted_database_node_survives_as_a_read_writing_step() -> None:
+    """§4.6: ``_STEP_KINDS`` gains the three kinds so a database node's declared
+    reads/writes are not dropped like a decision's or a join's."""
+    draft = _database_draft()
+    draft.nodes[1] = draft.nodes[1].model_copy(update={"reads": ["topic"], "writes": ["tickets"]})
+    draft.state_fields = [DraftStateField(name="topic")]
+    graph = materialize(draft, "g-db3")
+    node = next(node for node in graph.nodes if node.kind == "nosql")
+    assert node.reads == ["topic"] and node.writes == ["tickets"]
+
+
+def test_a_drafts_tool_entry_naming_a_database_node_resolves_to_kind_and_id() -> None:
+    """§4.6: an entry is a catalog tool name or the *title* of a database node, which
+    resolves to ``<kind>:<id>`` exactly as a ``delegatesTo`` title resolves to an id."""
+    graph = materialize(_database_draft(tools=["Tickets", "web_search"]), "g-tools")
+    agent = next(node for node in graph.nodes if node.kind == "agent")
+    assert agent.agent is not None
+    assert agent.agent.tools == ["nosql:tickets", "web_search"]
+
+
+def test_a_drafts_tool_entry_naming_a_non_database_node_is_a_draft_error() -> None:
+    """A bare title that names an agent/programmatic/decision/join node is not a
+    tool: keeping it silently would leave the agent asking for something no emitter
+    can produce, so the draft is sent back with the reason."""
+    draft = _database_draft(tools=["Intake"])
+    with pytest.raises(DraftError, match="is either a catalog tool name"):
+        materialize(draft, "g-tools-bad")
+
+
+def test_delegating_to_a_database_node_is_a_draft_error_naming_the_tools_field() -> None:
+    """``delegatesTo`` renders ``_build_<id>(model)``, which a database node has no
+    agent module to satisfy; the draft is sent back with the field to use instead."""
+    draft = _database_draft(tools=[])
+    draft.nodes[2] = draft.nodes[2].model_copy(
+        update={"delegates_to": ["Tickets"], "template": "orchestrator"}
+    )
+    with pytest.raises(DraftError, match="listing its title in `tools`"):
+        materialize(draft, "g-delegate-db")
+
+
+def test_the_draft_prompt_names_the_three_kinds_and_the_tools_field() -> None:
+    """§4.6: one line per new kind, each saying the example schema is the starter's."""
+    instructions = generate_module.GENERATE_INSTRUCTIONS
+    for kind in ("sql", "nosql", "vector"):
+        assert f"- {kind}:" in instructions
+    assert "starter" in instructions
+    assert "`tools`" in instructions
+    assert "list[json]" in instructions
 
 
 # ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ the repository is what you ship.
 | **Configure a model in the app** | Pick a provider, paste a key, test it — no file, no environment variable, no restart. Turn on dry run to work offline. |
 | **Describe → workflow** | Write a paragraph — or attach the spreadsheets, decks, CSVs and screenshots the workflow runs on. If anything is ambiguous the app asks up to four questions with concrete options before drafting; deterministic code derives ids, decision branches, fan-out wiring, state fields and layout; the same reviewer that gates a compile checks the draft and feeds errors back. You land on an editable canvas. |
 | **Run on the canvas** | Execute the compiled project with your credentials and watch it node by node: live status on each node, per-node inputs and outputs, final state, run history. Edit and run again; a stale project recompiles first, in the same stream. |
+| **Database nodes with zero setup** | Drop an **SQL**, **NoSQL** or **Vector** node on the canvas and it runs immediately — no server, no driver, no credential. The generated project carries a repository `Protocol`, a working in-memory mock (SQLite, documents, a vector index with a local hash embedder), a live adapter, a per-node seed fixture and the `get_repository()` factory; going live is `SWARM_DB_MODE=live`, that engine's DSN, and `uv sync --extra live-<kind>`. An agent node can use a database node as a **read-only** tool by naming it in its Tools list, so the statement that runs is always the one you declared — never one a model wrote. |
 | **Compile to PydanticAI** | Five phases: review → scaffold → fill → boundary → validate. Nothing is written until review passes. The output is a project with `pyproject.toml`, pinned dependencies, and its own validation gate. |
 | **Export to LangGraph** | Four more phases convert the *validated* project into a LangGraph export: pure LangGraph orchestration, LangChain only for model calls, messages and tools. Verified the same way. |
 | **Validated before you see it** | Every compile passes `uv sync`, a keyless import, a rendered-diagram golden, a node-set assertion, and a dry run with a test model, with every credential variable stripped. |
@@ -62,9 +63,11 @@ The generated project, in full:
 
 ```
 workspace/projects/<graphId>/
-  pyproject.toml            pinned pydantic-ai-slim[...]==2.43.0, pydantic-graph==2.43.0
+  pyproject.toml            pinned pydantic-ai-slim[...]==2.43.0, pydantic-graph==2.43.0,
+                            plus one opt-in live-<kind> extra per database node
   .python-version
-  .env.example              the inherited model route, never the key
+  .env.example              the inherited model route, never the key; plus
+                            SWARM_DB_MODE and the DSN keys of any database nodes
   README.md
   src/swarm_workflow/
     state.py                @dataclass State from your stateFields
@@ -72,6 +75,9 @@ workspace/projects/<graphId>/
     graph.py                GraphBuilder wiring — generated, never model-written
     steps/<id>.py           one step per node; the model wrote only the marked body
     agents/<id>.py          one agent factory per agent node
+    repositories/           the database layer, only when the graph has an SQL,
+                            NoSQL or Vector node: the Protocol, the mock, the live
+                            adapter, the Embedder, and one seed fixture per node
   validate/dry_run.py       the project's own gate
   run/stream_run.py         the per-node tracer the Run button executes
 ```

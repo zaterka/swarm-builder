@@ -31,6 +31,16 @@ interface ModelSettingsProps {
 
 type Mode = 'configured' | 'none';
 
+/** Parse the Max output tokens field: blank = use the server default, a valid
+ * integer in range = that value, anything else = `NaN` (the caller turns it
+ * into a readable client-side validation problem instead of submitting). */
+function _parseMaxTokens(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isInteger(value) && value >= 256 && value <= 200000 ? value : NaN;
+}
+
 export function ModelSettings({ onSaved, onClose }: ModelSettingsProps) {
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -38,6 +48,7 @@ export function ModelSettings({ onSaved, onClose }: ModelSettingsProps) {
   const [model, setModel] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [maxTokens, setMaxTokens] = useState('');
   const [busy, setBusy] = useState(false);
   const [problems, setProblems] = useState<string[]>([]);
   const [test, setTest] = useState<TestConnectionResponse | null>(null);
@@ -49,6 +60,7 @@ export function ModelSettings({ onSaved, onClose }: ModelSettingsProps) {
     setModel(next.model?.model ?? '');
     setBaseUrl(next.model?.baseUrl ?? '');
     setApiKey('');
+    setMaxTokens(next.model?.maxTokens != null ? String(next.model.maxTokens) : '');
   }, []);
 
   useEffect(() => {
@@ -66,6 +78,11 @@ export function ModelSettings({ onSaved, onClose }: ModelSettingsProps) {
   /** Save the form as it stands. */
   const saveModel = async () => {
     if (!selected) return;
+    const parsedMaxTokens = _parseMaxTokens(maxTokens);
+    if (Number.isNaN(parsedMaxTokens)) {
+      setProblems(['Max output tokens must be a whole number between 256 and 200000.']);
+      return;
+    }
     setBusy(true);
     setProblems([]);
     setNotice(null);
@@ -77,6 +94,7 @@ export function ModelSettings({ onSaved, onClose }: ModelSettingsProps) {
           baseUrl: selected.requiresBaseUrl ? baseUrl.trim() : null,
           apiKey: apiKey.trim() ? apiKey.trim() : null,
           clearApiKey: false,
+          maxTokens: parsedMaxTokens,
         },
       });
       adopt(next);
@@ -101,6 +119,7 @@ export function ModelSettings({ onSaved, onClose }: ModelSettingsProps) {
           model: settings.model.model,
           baseUrl: settings.model.baseUrl ?? null,
           clearApiKey: true,
+          maxTokens: settings.model.maxTokens ?? null,
         },
       });
       adopt(next);
@@ -255,6 +274,23 @@ export function ModelSettings({ onSaved, onClose }: ModelSettingsProps) {
               </datalist>
               <p className="sb-hint">
                 Any model id this provider accepts works, even if it is not in the list.
+              </p>
+
+              <label className="sb-field">
+                <span>Max output tokens</span>
+                <input
+                  type="number"
+                  min={256}
+                  max={200000}
+                  value={maxTokens}
+                  placeholder={`default: ${settings.maxTokensDefault}`}
+                  onChange={(e) => setMaxTokens(e.target.value)}
+                  aria-label="Max output tokens"
+                />
+              </label>
+              <p className="sb-hint">
+                The output budget for drafting, compiling and converting. Leave empty to use a
+                per-provider default ({settings.maxTokensDefault} for the current model).
               </p>
 
               {selected.requiresBaseUrl && (

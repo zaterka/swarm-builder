@@ -1,0 +1,316 @@
+"""Document repositories: a dependency-free in-memory mock and a pymongo adapter.
+
+Mock is the default and needs nothing installed: the mock holds the node's seed
+documents and implements the small, explicitly enumerated subset of the MongoDB
+query language listed below -- anything outside that subset raises instead of
+matching everything. Live needs ``SWARM_DB_MODE=live``, ``SWARM_NOSQL_DSN`` (the
+DSN names the database) and the driver:
+
+```bash
+uv sync --extra live-nosql
+```
+
+The live driver is imported inside :meth:`MongoRepository.__init__` -- never at
+module import time -- so ``import <package>.graph`` succeeds with nothing
+installed. Both implementations run the same :func:`assert_supported_filter`
+check first, so a filter the mock refuses cannot silently behave differently in
+live mode.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any, Protocol
+
+#: The operators this repository implements. Deliberately a closed set: an
+#: unrecognized operator must fail loudly, because the failure mode of quietly
+#: ignoring one is a query that looks selective and returns every document.
+_SUPPORTED_OPERATORS = (
+    "$$eq",
+    "$$ne",
+    "$$gt",
+    "$$gte",
+    "$$lt",
+    "$$lte",
+    "$$in",
+    "$$regex",
+    "$$exists",
+)
+
+#: Top-level logical operators. They take a *list* of filters rather than a value,
+#: which is why they are checked structurally and not against a field.
+_LOGICAL_OPERATORS = ("$$and", "$$or")
+
+
+class DocumentRepository(Protocol):
+    """The surface a NoSQL node's step, and any read-only tool built from it, is
+    typed against.
+
+    ``insert_one`` is the only write, and it exists for a node that declared
+    ``operation: insert_one`` -- never for an agent tool, which is emitted
+    against a node's declared read operation only.
+    """
+
+    def find(
+        self, filter: Mapping[str, Any] | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return the matching documents, in seed order."""
+        ...
+
+    def find_one(self, filter: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+        """Return the first matching document, or ``None``."""
+        ...
+
+    def count(self, filter: Mapping[str, Any] | None = None) -> int:
+        """Return how many documents match."""
+        ...
+
+    def insert_one(self, document: Mapping[str, Any]) -> str:
+        """Append one document and return its id."""
+        ...
+
+
+def assert_supported_filter(filter: Mapping[str, Any] | None) -> None:
+    """Reject a filter that uses an operator this repository does not implement.
+
+    Called by both implementations before they touch any data, so the mock's
+    operator set is the *contract* rather than a mock-only limitation. A filter
+    outside the set raises ``NotImplementedError`` naming the operator -- never
+    "match everything", which is what an unhandled operator would otherwise
+    degrade into.
+
+    Args:
+        filter: The filter about to be applied; ``None`` and ``{}`` match all.
+
+    Raises:
+        NotImplementedError: If the filter uses an unsupported ``$$operator``.
+        TypeError: If ``$$and``/``$$or`` are not given a list of filters.
+    """
+    for key, condition in (filter or {}).items():
+        if key.startswith("$$"):
+            if key not in _LOGICAL_OPERATORS:
+                raise NotImplementedError(
+                    f"the document filter operator {key!r} is not supported; this project "
+                    f"implements {_SUPPORTED_OPERATORS} plus {_LOGICAL_OPERATORS}"
+                )
+            if not isinstance(condition, Sequence) or isinstance(condition, str | bytes):
+                raise TypeError(
+                    f"{key} needs a list of filters, got {type(condition).__name__}"
+                )
+            for clause in condition:
+                assert_supported_filter(clause)
+            continue
+        if isinstance(condition, Mapping):
+            for operator in condition:
+                if operator.startswith("$$") and operator not in _SUPPORTED_OPERATORS:
+                    raise NotImplementedError(
+                        f"the document filter operator {operator!r} is not supported; this "
+                        f"project implements {_SUPPORTED_OPERATORS} plus {_LOGICAL_OPERATORS}"
+                    )
+
+
+def _has_operator(condition: Mapping[str, Any]) -> bool:
+    """Whether a mapping value is an operator dict rather than a sub-document."""
+    return any(key.startswith("$$") for key in condition)
+
+
+def _matches_value(actual: Any, operand: Any) -> bool:
+    """Equality with Mongo's array semantics.
+
+    ``{"tags": "auth"}`` matches a document whose ``tags`` array *contains*
+    "auth", and an array also equals itself. Without this the mock returns
+    nothing for a filter the live database answers -- the divergence the
+    two-implementation design exists to prevent.
+    """
+    if actual == operand:
+        return True
+    if isinstance(actual, list):
+        return any(item == operand for item in actual)
+    return False
+
+
+def _matches_in(actual: Any, operand: Any) -> bool:
+    """``$$in`` with Mongo's array semantics: an array field matches any element."""
+    if isinstance(actual, list):
+        return any(item in operand for item in actual)
+    return actual in operand
+
+
+def _resolve(document: Mapping[str, Any], path: str) -> tuple[bool, Any]:
+    """Follow a dotted path, returning ``(found, value)``.
+
+    Dotted paths are what make a nested field addressable without any query
+    language: ``{"user.role": "admin"}`` reaches inside ``{"user": {"role": ...}}``.
+    The ``found`` flag is separate from the value because a stored ``None`` and a
+    missing field must not be confused -- ``$$exists`` and ``$$eq: None`` need to
+    tell them apart.
+    """
+    current: Any = document
+    for part in path.split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return False, None
+        current = current[part]
+    return True, current
+
+
+def _matches(document: Mapping[str, Any], filter: Mapping[str, Any] | None) -> bool:
+    """Whether one document satisfies one filter (already operator-checked)."""
+    for key, condition in (filter or {}).items():
+        if key == "$$and":
+            if not all(_matches(document, clause) for clause in condition):
+                return False
+            continue
+        if key == "$$or":
+            if not any(_matches(document, clause) for clause in condition):
+                return False
+            continue
+        present, actual = _resolve(document, key)
+        if isinstance(condition, Mapping) and _has_operator(condition):
+            for operator, operand in condition.items():
+                if not _matches_operator(present, actual, operator, operand):
+                    return False
+            continue
+        # A plain value, or a sub-document with no operators: equality. A missing
+        # field never equals anything.
+        if not present or not _matches_value(actual, condition):
+            return False
+    return True
+
+
+def _matches_operator(present: bool, actual: Any, operator: str, operand: Any) -> bool:
+    """Apply one operator to one resolved field value."""
+    if operator == "$$eq":
+        return present and _matches_value(actual, operand)
+    if operator == "$$ne":
+        return not present or not _matches_value(actual, operand)
+    if operator == "$$exists":
+        return present == bool(operand)
+    if operator == "$$in":
+        return present and _matches_in(actual, operand)
+    if operator == "$$regex":
+        if not present:
+            return False
+        # `re.search`, not `re.match`: Mongo's `$$regex` is unanchored.
+        return re.search(str(operand), str(actual)) is not None
+    # The ordering operators. An incomparable pair (a string against an int)
+    # matches nothing rather than raising: filtering is a read, and a seed whose
+    # field types differ per document must not turn into a crash mid-graph.
+    try:
+        if operator == "$$gt":
+            return present and actual > operand
+        if operator == "$$gte":
+            return present and actual >= operand
+        if operator == "$$lt":
+            return present and actual < operand
+        if operator == "$$lte":
+            return present and actual <= operand
+    except TypeError:
+        return False
+    raise NotImplementedError(f"the document filter operator {operator!r} is not supported")
+
+
+class InMemoryDocumentRepository:
+    """The mock: the seed documents, held in memory.
+
+    Ephemeral by design: ``insert_one`` writes to this process's copy and a
+    restart re-reads the seed file. Persistence is what live mode is for.
+    """
+
+    def __init__(self, seed_path: Path) -> None:
+        self.seed_path = Path(seed_path)
+        documents = json.loads(self.seed_path.read_text(encoding="utf-8"))
+        if not isinstance(documents, list) or not all(
+            isinstance(document, Mapping) for document in documents
+        ):
+            raise ValueError(
+                f"{self.seed_path} must hold a JSON array of documents, one object per "
+                "document -- the shape the node's seed declares"
+            )
+        self._documents: list[dict[str, Any]] = [dict(document) for document in documents]
+
+    def find(
+        self, filter: Mapping[str, Any] | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return the matching documents in seed order.
+
+        ``limit <= 0`` means "no limit", mirroring the live driver's own
+        ``limit(0)``, so a deliberate full scan stays expressible.
+        """
+        assert_supported_filter(filter)
+        matched = [dict(document) for document in self._documents if _matches(document, filter)]
+        return matched if limit <= 0 else matched[:limit]
+
+    def find_one(self, filter: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+        """Return the first matching document, or ``None``."""
+        matched = self.find(filter, limit=1)
+        return matched[0] if matched else None
+
+    def count(self, filter: Mapping[str, Any] | None = None) -> int:
+        """Return how many documents match."""
+        assert_supported_filter(filter)
+        return sum(1 for document in self._documents if _matches(document, filter))
+
+    def insert_one(self, document: Mapping[str, Any]) -> str:
+        """Append one document and return its id.
+
+        An id is generated from the document count when the caller does not
+        supply ``_id``: deterministic within a process, which is what a mock
+        needs, and never a random value that would make two runs of one graph
+        disagree. Uniqueness is not enforced -- this is a mock, and a live
+        collection enforces it properly.
+        """
+        stored = dict(document)
+        identifier = str(stored.get("_id") or f"doc-{len(self._documents)}")
+        stored["_id"] = identifier
+        self._documents.append(stored)
+        return identifier
+
+
+class MongoRepository:
+    """The live adapter: pymongo over ``SWARM_NOSQL_DSN``.
+
+    The DSN names the database (``mongodb://localhost:27017/swarm_workflow``) and
+    ``collection`` is the node's declared collection, so going live adds no
+    second configuration surface.
+    """
+
+    def __init__(self, dsn: str, collection: str) -> None:
+        # Lazy, and the only place the driver is touched: `pymongo` is an optional
+        # extra (`uv sync --extra live-nosql`), so importing it at module import
+        # time would break the keyless gate.
+        try:
+            from pymongo import MongoClient
+        except ImportError as exc:  # pragma: no cover - the gate never gets here
+            raise RuntimeError(
+                "the live NoSQL adapter needs the pymongo driver: install it with "
+                "`uv sync --extra live-nosql` and set SWARM_NOSQL_DSN"
+            ) from exc
+        self._collection = MongoClient(dsn).get_default_database()[collection]
+
+    def find(
+        self, filter: Mapping[str, Any] | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return the matching documents."""
+        assert_supported_filter(filter)
+        cursor = self._collection.find(dict(filter or {}))
+        if limit > 0:
+            cursor = cursor.limit(limit)
+        return [dict(document) for document in cursor]
+
+    def find_one(self, filter: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
+        """Return the first matching document, or ``None``."""
+        assert_supported_filter(filter)
+        document = self._collection.find_one(dict(filter or {}))
+        return None if document is None else dict(document)
+
+    def count(self, filter: Mapping[str, Any] | None = None) -> int:
+        """Return how many documents match."""
+        assert_supported_filter(filter)
+        return int(self._collection.count_documents(dict(filter or {})))
+
+    def insert_one(self, document: Mapping[str, Any]) -> str:
+        """Insert one document and return its id."""
+        return str(self._collection.insert_one(dict(document)).inserted_id)

@@ -48,9 +48,10 @@ independently.
   rather than something the agent can react to. ``ModelRetry`` is what
   produces the "tool returns the error to the agent" behavior PLAN.md's
   failure-mode table requires, and it is what ``Agent(retries=...)``
-  budgets. Note that ``retries`` is the agent-level default; each tool
-  keeps pydantic-ai's own per-tool budget unless `retries=` is passed to
-  ``tool_plain`` as well.
+  budgets. The read tools get a larger per-tool budget via
+  ``READ_TOOL_RETRIES`` passed to ``tool_plain``, because a wrong path is
+  the one mistake a weak model makes repeatedly and its retry message now
+  names the files that exist.
 * **``reasoning_effort`` from the resolved route is *not* forwarded.**
   The installed 2.43.0 ``ModelSettings`` has no ``reasoning_effort``
   field (only ``thinking``), so forwarding the route's value would fail
@@ -74,7 +75,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic import BaseModel
-from pydantic_ai import Agent, ModelRetry, UsageLimits
+from pydantic_ai import Agent, ModelRetry, ModelSettings, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models import Model
 
@@ -100,6 +101,16 @@ logger = logging.getLogger(__name__)
 #: validation or raise :class:`~pydantic_ai.ModelRetry` before the run
 #: itself fails. Covers ``llm-retry``'s job for the tool-call layer.
 AGENT_RETRIES: int = 3
+
+#: Per-tool retry budget for the *read* tools (``read_file`` and the
+#: converter's ``read_source_file``). Path-guessing is the observed
+#: failure mode of weaker models: a wrong filename is a recoverable
+#: mistake, and the read tools' retry messages now list the files that
+#: *do* exist, so a few extra attempts let the model correct itself
+#: instead of killing the whole fill run with ``UnexpectedModelBehavior``.
+#: Writes and ``parse_check`` keep the agent-level 3: their retry messages
+#: are already specific, and a write failure is a stronger signal.
+READ_TOOL_RETRIES: int = 5
 
 #: Maximum model requests (i.e. provider round trips) for one fill run.
 #: This is the primary spend bound: a graph with N fillable nodes needs
@@ -157,8 +168,20 @@ FORBIDDEN_FILES: tuple[str, ...] = (
     "pyproject.toml",
 )
 
-#: Project-relative directories the agent must never touch.
-FORBIDDEN_DIRECTORIES: tuple[str, ...] = ("validate",)
+#: Project-relative directory holding the database repository layer --
+#: Protocols, seeded mocks, lazily imported live adapters, the port helpers and
+#: one seed per database node. Emitted whole by ``compile/database.py``, so there
+#: is never anything in it for a model to write.
+REPOSITORIES_DIR_PARTS: tuple[str, ...] = (*STEPS_DIR_PARTS[:2], "repositories")
+
+#: Project-relative directories the agent must never touch. ``validate/`` is the
+#: project's own gate and ``repositories/`` is the database seam: a batch of a
+#: database graph's behaviour lives there, and the boundary check freezes it
+#: whole, so an edit is refused by the path guard rather than caught later.
+FORBIDDEN_DIRECTORIES: tuple[str, ...] = (
+    "validate",
+    "/".join(REPOSITORIES_DIR_PARTS),
+)
 
 #: Node kinds whose step body is genuinely unfilled after Phase 2,
 #: re-exported from ``fake_fill`` so the real and stub fillers can never
@@ -356,6 +379,62 @@ def splice_region(text: str, node_id: str, region: str, body: str) -> str:
     return "".join([*lines[: location.first], *replacement, *lines[location.last + 1 :]])
 
 
+#: Directories skipped when listing a project's readable files for a
+#: retry message. The fill agent never sees ``.venv`` (Phase 5 creates it
+#: after the fill) but a defensive skip keeps a listing bounded regardless.
+_LISTING_EXCLUDED_DIRS = frozenset({".venv", "__pycache__", ".git"})
+
+#: Maximum readable files named in a read-tool retry message. Bounded so a
+#: large graph cannot flood the model's context; the editable modules sort
+#: first, so the entries that matter survive truncation.
+_LISTING_LIMIT = 40
+
+
+def _readable_file_listing(
+    root: Path, editable_dir_parts: tuple[str, ...], *, limit: int = _LISTING_LIMIT
+) -> str:
+    """Render a bounded list of the files under ``root`` a model may read.
+
+    Editable modules (``root/<editable_dir_parts>/<id>.py``) come first --
+    they are the files the fill agent is actually asked to edit -- then
+    every other regular file, each as a project-relative POSIX path.
+    Returns ``"(none)"`` when nothing is listable.
+
+    Args:
+        root: The project (or source) directory to enumerate.
+        editable_dir_parts: The project-relative directory holding the
+            marker-bearing modules the agent writes.
+        limit: Maximum number of paths to include.
+
+    Returns:
+        A comma-separated path list, truncated with a trailing count note.
+    """
+    editable: list[str] = []
+    other: list[str] = []
+    try:
+        for path in sorted(root.rglob("*")):
+            if not path.is_file():
+                continue
+            relative_parts = path.relative_to(root).parts[:-1]
+            if any(part in _LISTING_EXCLUDED_DIRS for part in relative_parts):
+                continue
+            rel = path.relative_to(root).as_posix()
+            if path.parent == root.joinpath(*editable_dir_parts):
+                editable.append(rel)
+            else:
+                other.append(rel)
+    except OSError:  # pragma: no cover - defensive; the dir always exists
+        return "(none)"
+
+    ordered = sorted(editable) + sorted(other)
+    if not ordered:
+        return "(none)"
+    if len(ordered) > limit:
+        shown = ordered[:limit]
+        return ", ".join(shown) + f", …and {len(ordered) - limit} more"
+    return ", ".join(ordered)
+
+
 # ---------------------------------------------------------------------------
 # The fill session: three tools, one project, no escape hatch
 # ---------------------------------------------------------------------------
@@ -401,6 +480,11 @@ class FillSession:
         self.forbidden_directories = forbidden_directories
         self.source_root = source_root.resolve() if source_root is not None else None
         self.written_node_ids: list[str] = []
+        #: Output budget the agent should ask for; ``None`` means "keep the
+        #: provider default". Set by ``_run_fill`` from the live model; the
+        #: builder reads it here so the agent-builder seam's signature stays
+        #: unchanged for the scripted-model tests.
+        self.max_output_tokens: int | None = None
 
     # -- confinement --------------------------------------------------
 
@@ -451,7 +535,10 @@ class FillSession:
                 f"{', '.join(d + '/' for d in self.forbidden_directories)} -- is off limits."
             )
         if not resolved.is_file():
-            raise ModelRetry(f"{name!r} does not exist in this project.")
+            listing = _readable_file_listing(self.project_root, self.editable_dir_parts)
+            raise ModelRetry(
+                f"{name!r} does not exist in this project. Editable files: {listing}"
+            )
         return resolved
 
     # -- tool 1: read_file --------------------------------------------
@@ -472,7 +559,10 @@ class FillSession:
         """
         resolved = self._resolve(name)
         if not resolved.is_file():
-            raise ModelRetry(f"{name!r} is not a file in this project.")
+            listing = _readable_file_listing(self.project_root, self.editable_dir_parts)
+            raise ModelRetry(
+                f"{name!r} is not a file in this project. Readable files: {listing}"
+            )
         try:
             return resolved.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
@@ -657,7 +747,10 @@ class FillSession:
                 f"{exc}. Every source path must resolve inside {self.source_root}."
             ) from exc
         if not resolved.is_file():
-            raise ModelRetry(f"{name!r} is not a file in the source project.")
+            listing = _readable_file_listing(self.source_root, self.editable_dir_parts)
+            raise ModelRetry(
+                f"{name!r} is not a file in the source project. Readable files: {listing}"
+            )
         try:
             return resolved.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
@@ -1090,6 +1183,12 @@ def build_fill_agent(
     exposed so a test can substitute a scripted model without reaching
     into this module's internals.
 
+    The output budget is read from ``session.max_output_tokens`` rather
+    than passed as a parameter, so the agent-builder seam keeps the
+    signature the scripted-model tests substitute. An explicit budget is
+    essential: without one, an Anthropic route defaults to 4096 output
+    tokens and truncates a multi-hundred-line step body.
+
     Args:
         session: The session whose tools the agent may call.
         model: The model to run on, from ``LiveModel.model`` (fact 22: a
@@ -1105,8 +1204,11 @@ def build_fill_agent(
         deps_type=type(None),
         instructions=instructions,
         retries=AGENT_RETRIES,
+        model_settings=ModelSettings(max_tokens=session.max_output_tokens)
+        if session.max_output_tokens
+        else None,
     )
-    agent.tool_plain(session.read_file)
+    agent.tool_plain(session.read_file, retries=READ_TOOL_RETRIES)
     agent.tool_plain(session.write_region)
     agent.tool_plain(session.parse_check)
     return agent
@@ -1196,6 +1298,7 @@ async def _run_fill(
     model_description: str,
     previous_failure: str | None,
     config: _FillRunConfig | None = None,
+    max_output_tokens: int | None = None,
 ) -> FillResult:
     """Run one fill attempt and report the nodes it wrote.
 
@@ -1210,6 +1313,8 @@ async def _run_fill(
         previous_failure: The prior phase-4/5 failure text, or ``None``.
         config: Injectable agent-builder/limits seam, or ``None`` for
             the production defaults.
+        max_output_tokens: The explicit output budget for this attempt,
+            read off the live model. ``None`` keeps the provider default.
 
     Returns:
         The ids of the nodes whose regions were written, in write order.
@@ -1224,6 +1329,7 @@ async def _run_fill(
     """
     resolved_config = config if config is not None else _FillRunConfig()
     session = FillSession(project_dir)
+    session.max_output_tokens = max_output_tokens
     instructions = build_fill_instructions(
         project_dir,
         graph,
@@ -1306,6 +1412,7 @@ async def fill(
             "model-free path)"
         )
     model, description = _model_and_description(live_model)
+    max_output_tokens = getattr(live_model, "max_output_tokens", None)
     logger.info("fill: %s (project %s)", description, project_dir)
     return await _run_fill(
         project_dir=project_dir,
@@ -1313,6 +1420,7 @@ async def fill(
         model=model,
         model_description=description,
         previous_failure=previous_failure,
+        max_output_tokens=max_output_tokens,
     )
 
 
@@ -1327,6 +1435,7 @@ __all__ = [
     "FORBIDDEN_FILES",
     "INPUT_TOKENS_LIMIT",
     "OUTPUT_TOKENS_LIMIT",
+    "READ_TOOL_RETRIES",
     "REGION_BODY",
     "REGION_IMPORTS",
     "REQUEST_LIMIT",

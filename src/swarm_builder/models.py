@@ -45,10 +45,10 @@ would drift:
 - :data:`PORT_TYPE_ANNOTATIONS` / :data:`PORT_TYPE_IMPORTS` -- a
   :data:`PortType` value must never be interpolated into a Python
   annotation verbatim: ``'json'`` is not a valid annotation (the
-  identifier ``json`` is a module, not a type), and ``'list[str]'`` would
-  be a string constant rather than a generic. Both the emitter's
-  step-module codegen and Phase 1's port-type-mismatch check need one
-  shared table.
+  identifier ``json`` is a module, not a type), ``'list[str]'`` would be
+  a string constant rather than a generic, and ``'list[json]'`` would be
+  a subscript of the ``json`` *module*. Both the emitter's step-module
+  codegen and Phase 1's port-type-mismatch check need one shared table.
 - :data:`REDUCER_FUNCTIONS` -- exactly the four ``ReducerId`` literals,
   each mapping to one ``pydantic_graph`` reducer function name.
   ``reduce_null`` exists upstream but intentionally has no ``ReducerId``
@@ -88,7 +88,12 @@ class SwarmBaseModel(BaseModel):
 # Enumerations
 # ---------------------------------------------------------------------------
 
-NodeKind = Literal["agent", "programmatic", "decision", "join"]
+#: The node kinds the canvas can draw. The three database kinds are real
+#: graph steps like ``agent`` and ``programmatic`` -- a ``sql``/``nosql``/
+#: ``vector`` node has a deterministically emitted body, never a
+#: model-filled one -- so each belongs in the emitters' step-kind tuples
+#: and never in ``FILLABLE_NODE_KINDS``.
+NodeKind = Literal["agent", "programmatic", "decision", "join", "sql", "nosql", "vector"]
 
 #: The v1 template catalog. A 'rag' template is deliberately deferred: its
 #: embedder and cache bring dependency and sandbox friction no other
@@ -97,7 +102,12 @@ NodeKind = Literal["agent", "programmatic", "decision", "join"]
 #: reshape of this type or of anything that matches on it.
 TemplateId = Literal["chat", "orchestrator", "websearch"]
 
-PortType = Literal["str", "json", "list[str]"]
+#: ``list[json]`` exists because a database read returns a *list of rows*:
+#: coercing a result set to ``json`` (a single ``dict[str, Any]``) or to a
+#: newline-joined ``str`` would make the rows lossy the moment they cross an
+#: edge -- including through a ``join`` node, which is where a database read
+#: tends to be consumed.
+PortType = Literal["str", "json", "list[str]", "list[json]"]
 
 #: Exactly four literals: `reduce_null` exists upstream but has no
 #: `ReducerId` counterpart, so this type's lookup table
@@ -122,6 +132,7 @@ PORT_TYPE_ANNOTATIONS: dict[PortType, str] = {
     "str": "str",
     "list[str]": "list[str]",
     "json": "dict[str, Any]",
+    "list[json]": "list[dict[str, Any]]",
 }
 
 #: PortType -> the import line the emitted module needs for its
@@ -132,6 +143,7 @@ PORT_TYPE_IMPORTS: dict[PortType, str | None] = {
     "str": None,
     "list[str]": None,
     "json": "from typing import Any",
+    "list[json]": "from typing import Any",
 }
 
 #: ReducerId -> the pydantic_graph reducer function name to import and
@@ -274,6 +286,86 @@ class JoinSpec(SwarmBaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Database node specs (kinds ``sql`` / ``nosql`` / ``vector``)
+#
+# Every field below is *declared data*, never a default applied at compile
+# time: the node's seed and operation live in the document, so the document
+# alone determines what the generated mock contains and what the emitted
+# step runs. A starter template fills these in once, when the node is
+# created (``templates/database/``); after that the Inspector is the only
+# thing that changes them. That is why the seed fields are required rather
+# than optional -- an absent seed would make the mock's contents a
+# compile-time decision, which is exactly what this design forbids.
+# ---------------------------------------------------------------------------
+
+
+class SqlSpec(SwarmBaseModel):
+    """Present on ``kind="sql"`` nodes. ``query`` uses ``:name`` placeholders
+    (``sqlite3``'s native form -- the live adapter rewrites them for the
+    driver, and one declaration syntax keeps the Inspector honest about
+    which parameters the query actually binds).
+
+    The split between ``query`` and ``seed_sql`` is deliberate: a node's
+    declared operation is what the step and any agent tool run, while the
+    seed is the mock's schema *and* rows. ``write`` is a declaration, not a
+    hint -- it selects the emitted call (``execute()`` instead of
+    ``query()``) and disqualifies the node as an agent tool, because a
+    write reachable from a model's tool call is exactly the injection
+    surface this design refuses to create.
+    """
+
+    query: str
+    seed_sql: str
+    write: bool = False
+    note: str | None = None
+
+
+class NosqlSpec(SwarmBaseModel):
+    """Present on ``kind="nosql"`` nodes: one collection, one operation.
+
+    ``filter`` values may be the sentinel string ``"$input"``, which the
+    emitter replaces with the upstream node's value -- so the document can
+    say "match the field the user's input names" without carrying any
+    expression language into a JSON document. ``limit`` is a warning
+    threshold rather than a hard rule (``<= 0`` reads as "unbounded"), so a
+    deliberate full scan stays expressible.
+    """
+
+    collection: str
+    operation: Literal["find", "find_one", "count", "insert_one"] = "find"
+    filter: dict[str, object] = Field(default_factory=dict)
+    limit: int = 20
+    seed: list[dict[str, object]] = Field(default_factory=list)
+    note: str | None = None
+
+
+class VectorDocument(SwarmBaseModel):
+    """One seeded vector document. ``metadata`` stays a plain dict rather
+    than a per-node schema: the mock never filters on it, and a live
+    collection's payload shape is the user's business, not the canvas's."""
+
+    id: str
+    text: str
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class VectorSpec(SwarmBaseModel):
+    """Present on ``kind="vector"`` nodes: a collection and a seed index.
+
+    ``min_score`` is cosine similarity in ``[-1, 1]``, so its default of
+    ``0.0`` means "no threshold" rather than "no weak matches" -- a
+    threshold that admitted nothing by default would make a freshly created
+    node return an empty list and look broken.
+    """
+
+    collection: str
+    top_k: int = 4
+    min_score: float = 0.0
+    seed: list[VectorDocument] = Field(default_factory=list)
+    note: str | None = None
+
+
+# ---------------------------------------------------------------------------
 # SwarmNode
 # ---------------------------------------------------------------------------
 
@@ -290,10 +382,14 @@ class SwarmNode(SwarmBaseModel):
     the title-to-id mapping must stay stable across recompiles or a
     recompile would rename step modules instead of updating them.
 
-    Exactly one of ``agent`` / ``programmatic`` / ``decision`` / ``join``
-    is expected to be set, matching ``kind`` -- enforced by Phase 1
-    (``review.py``), not here, since that cross-field rule belongs with the
-    rest of the structural graph validation.
+    Exactly one of ``agent`` / ``programmatic`` / ``decision`` / ``join`` /
+    ``sql`` / ``nosql`` / ``vector`` is expected to be set, matching
+    ``kind`` -- enforced by Phase 1 (``review.py``), not here, since that
+    cross-field rule belongs with the rest of the structural graph
+    validation. A database node's ``io`` pair is likewise fixed by its
+    kind (``str -> list[json]``), and it never carries a ``template``:
+    templates are agent-only, and a stale value there would be silently
+    ignored.
     """
 
     id: str
@@ -309,6 +405,9 @@ class SwarmNode(SwarmBaseModel):
     programmatic: ProgrammaticSpec | None = None
     decision: DecisionSpec | None = None
     join: JoinSpec | None = None
+    sql: SqlSpec | None = None
+    nosql: NosqlSpec | None = None
+    vector: VectorSpec | None = None
 
 
 # ---------------------------------------------------------------------------

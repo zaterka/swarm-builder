@@ -15,6 +15,7 @@ running see [`guide.md`](./guide.md).
 - [GET /api/health](#get-apihealth)
 - [GET /api/models](#get-apimodels)
 - [GET /api/templates](#get-apitemplates)
+- [GET /api/database-starters](#get-apidatabase-starters)
 - [Graph CRUD](#graph-crud)
 - [POST /api/graphs/:id/review](#post-apigraphsidreview)
 - [GET /api/graphs/:id/export](#get-apigraphsidexport)
@@ -357,6 +358,71 @@ tie — including the 0-0 tie of an intent matching nothing — resolves to
 | `websearch` | `search`, `browse`, `news`, `latest` |
 | `orchestrator` | `delegate`, `coordinate`, `route`, `sub-agent`, `plan and assign` |
 
+## GET /api/database-starters
+
+The **database starter catalog**: one entry per database node kind (`sql`,
+`nosql`, `vector`), carrying the default operation, the example data and the
+mandatory port pair that node kind is created with. The palette fetches this
+once when the app starts and caches it; creating a node copies the entry's
+`spec` **and** `io` into the graph document, which is why the document is
+self-contained and the Inspector can show exactly what will run.
+
+```bash
+curl -s http://127.0.0.1:8420/api/database-starters | python3 -m json.tool
+```
+
+One entry per kind. The `sql` entry is shown, with its `label`, `description`
+and (long) `seedSql` elided:
+
+```json
+[
+  {
+    "kind": "sql",
+    "label": "…",
+    "description": "…",
+    "spec": {
+      "query": "SELECT o.id, o.total FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.name = :input ORDER BY o.id",
+      "seedSql": "CREATE TABLE customers(id INTEGER PRIMARY KEY, name TEXT, city TEXT); …",
+      "write": false,
+      "note": null
+    },
+    "io": { "inputType": "str", "outputType": "list[json]" },
+    "liveExtra": "live-sql",
+    "envVars": ["SWARM_DB_MODE", "SWARM_SQL_DSN"]
+  }
+]
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `kind` | `sql` \| `nosql` \| `vector` | The node kind this entry creates. |
+| `label` | string | The kind's name, from that kind's `starter.json` — the text the palette shows. |
+| `description` | string | A sentence or two about what the starter reads, likewise from `starter.json`. |
+| `spec` | object | The default operation and example data, in the node's own spec shape (`SqlSpec` / `NosqlSpec` / `VectorSpec`), with the same camelCase field names the graph document uses: the SQL entry carries `query`, `seedSql`, `write` and `note`; the NoSQL entry `collection`, `operation`, `filter`, `limit`, `seed` and `note`; the vector entry `collection`, `topK`, `minScore`, `seed` and `note`. |
+| `io` | `{inputType, outputType}` | The kind's mandatory port pair: always `str` in and `list[json]` out. |
+| `liveExtra` | string | The generated project's optional-dependency extra that installs this kind's live driver — `live-sql`, `live-nosql`, `live-vector` — i.e. the extra the generated README's `uv sync --extra live-<kind>` names. |
+| `envVars` | array of strings | The environment variable names this kind contributes to the generated `.env.example`: the `SWARM_DB_MODE` switch plus that engine's DSN key — `SWARM_SQL_DSN`, `SWARM_NOSQL_DSN` or `SWARM_VECTOR_DSN`. |
+
+`label`, `description` and `spec` are the kind's `starter.json` echoed
+verbatim, so they are content rather than contract; the example above shows the
+SQL starter's default operation (its seed SQL is elided here, and is present in
+full in the response). `spec` and `io` are what the Inspector writes into a new
+node, and the same values are what `db_starter_drift` compares a node's
+operation against.
+
+**Degradation matches `GET /api/templates`.** The catalog module is imported
+**inside the handler**, so a broken catalog is a `503` on this one route, with
+a detail naming the module, rather than a server that fails at startup. While
+this request cannot be served the palette renders its three database entries
+**disabled with an explanatory hint**, so the app never creates a node it
+cannot make compilable. There is deliberately no hand-copied starter literal in
+the web bundle: a second copy would drift from the server's.
+
+The route declares a `response_model` for the same reason `/api/templates`
+does: the frontend's types are generated from this server's OpenAPI document,
+and these seven named fields are what the palette can then hold as typed values
+instead of `unknown`.
+
 ## Graph CRUD
 
 ### GET /api/graphs
@@ -464,6 +530,24 @@ an unreadable document, `503` if the compile subsystem cannot be imported.
 (fewer than two inbound arms), `join_output_type_unusual` (a list reducer
 with a non-`list[str]` output type), `delegate_without_edge` (an
 `agent.delegatesTo` entry with no `delegate` edge on the canvas).
+
+**Database-node codes**, added by the three database kinds (`sql`, `nosql`,
+`vector`):
+
+| Code | Severity | Rule |
+|---|---|---|
+| `db_empty_operation` | error | A node with no operation materialized: `sql.query`, `sql.seedSql`, `nosql.collection`, `nosql.operation` or `vector.collection` is empty. |
+| `db_placeholder_mismatch` | error | The SQL `:name` placeholders do not match what the declared input type supplies. |
+| `db_input_type_unsupported` | error | An input type that kind cannot bind — `list[json]` for all three, and `list[str]` for a vector node. |
+| `db_op_io_mismatch` | error | The declared port pair is not a bindable one for the kind: the output must be `list[json]`, and the input must be one of that kind's bindable types (`sql`/`nosql`: `str`, `json`, `list[str]`; `vector`: `str`). |
+| `db_write_as_tool` | error | An agent lists a database node whose operation is a write (`sql.write`, or `nosql.operation: insert_one`). |
+| `db_tool_unknown_node` | error | An `agent.tools` entry in the `sql:<id>` form names a missing node, or a node of another kind. |
+| `db_seed_invalid` | error | The seed does not parse for its kind. |
+| `db_template_set` | error | A database node carries a `template` — templates are agent-only, and a stale value would otherwise be ignored silently. |
+| `db_limit_unset` | warning | `nosql.limit` is not a positive number. |
+| `db_starter_drift` | warning | The operation or the seed differs from the kind's starter template. Skipped when the starter catalog cannot be imported. |
+| `db_separate_mock_instances` | warning | Two nodes of one kind declare different seeds, so each gets its own mock instance and a write in one is not visible to the other. |
+| `delegate_target_not_agent` | error | An `agent.delegatesTo` entry (or a `delegate` edge) names a node that is not an `agent` node, or names no node at all. Delegation compiles to an import of `agents/<child>.py`, so the generated project could not import. |
 
 **This endpoint returns review findings only.** Phase 1 also resolves the model
 route, and one resolution result is a warning — see
@@ -716,7 +800,7 @@ Two frame types beyond the compile's five:
 | `event` | Payload |
 |---|---|
 | `run` | `{status: "compiling" \| "starting" \| "started", model?, input?, compiled?}` — where the job is. `compiling` precedes a compile-if-stale; `started` carries the model the project resolved and the coerced input. |
-| `node` | `{nodeId, status: "started" \| "succeeded" \| "failed", inputs?, output?, stateDelta?, error?, traceback?, durationMs?}` — one `started` and one terminal frame per step (`agent`/`programmatic`). Decision and join nodes are builder constructs with no step function and are not traced; the canvas derives their state from their neighbours. Values longer than 4000 characters arrive as `{"__preview__": "...", "__truncated__": true}`. |
+| `node` | `{nodeId, status: "started" \| "succeeded" \| "failed", inputs?, output?, stateDelta?, error?, traceback?, durationMs?}` — one `started` and one terminal frame per step (`agent`/`programmatic`/`sql`/`nosql`/`vector`). Decision and join nodes are builder constructs with no step function and are not traced; the canvas derives their state from their neighbours. Values longer than 4000 characters arrive as `{"__preview__": "...", "__truncated__": true}`. |
 
 A run's terminal `done` payload is `{output, state, durationMs, model,
 compiled, finishedAt}` (also the snapshot `result`), and its `error` payload
@@ -1039,7 +1123,10 @@ the wire shape only.
       "agent": null,
       "programmatic": { "needs": [], "signatureHint": "strip whitespace" },
       "decision": null,
-      "join": null
+      "join": null,
+      "sql": null,
+      "nosql": null,
+      "vector": null
     }
   ],
   "edges": [{ "kind": "seq", "id": "e1", "source": "intake", "target": "chat_step", "label": null }],
@@ -1053,9 +1140,9 @@ Literals:
 | Field | Values |
 |---|---|
 | `version` | `1` |
-| `nodes[].kind` | `agent`, `programmatic`, `decision`, `join` |
-| `nodes[].template` | `chat`, `orchestrator`, `websearch`, or `null` (inferred from `intent`) |
-| `io.inputType` / `io.outputType`, `stateFields[].type` | `str`, `json`, `list[str]` |
+| `nodes[].kind` | `agent`, `programmatic`, `decision`, `join`, `sql`, `nosql`, `vector` |
+| `nodes[].template` | `chat`, `orchestrator`, `websearch`, or `null` (inferred from `intent`); always `null` on a database node — a template is agent-only |
+| `io.inputType` / `io.outputType`, `stateFields[].type` | `str`, `json`, `list[str]`, `list[json]` |
 | `nodes[].join.reducer` | `list_append`, `list_extend`, `dict_update`, `sum` |
 | `nodes[].join.initialFactory` | `list`, `dict`, `int`, or `null` (derived from `reducer`) |
 | `edges[].kind` | `seq`, `branch`, `fanout`, `join`, `delegate` |
@@ -1069,6 +1156,17 @@ enforces the correspondence):
 | `programmatic` | `needs` (PyPI requirement strings, unioned into the generated `pyproject.toml`), `signatureHint` (free text guidance for the fill agent — never executed or parsed) |
 | `decision` | `branches: [{match, targetNodeId}]`, `note` |
 | `join` | `reducer`, `initialFactory` |
+| `sql` | `query` (`:name` placeholders), `seedSql` (the mock's schema and rows — required), `write` (default `false`), `note` |
+| `nosql` | `collection`, `operation` (`find`, `find_one`, `count`, `insert_one`), `filter` (a JSON object, which may carry the `"$input"` sentinel), `limit`, `seed` (a list of documents), `note` |
+| `vector` | `collection`, `topK`, `minScore` (cosine, `[-1, 1]`, `0.0` meaning "no threshold"), `seed` (a list of `{id, text, metadata}`), `note` |
+
+Database kinds also carry the one literal `PortType` they introduced. `list[json]`
+is a list of rows: `PortType` is never interpolated verbatim into generated
+source, so it maps to the annotation `list[dict[str, Any]]` plus
+`from typing import Any` exactly like `json` does. A database node's port pair
+is mandatory rather than suggested — `sql` and `nosql` take `str` or `json` in,
+`vector` takes `str`, and all three return `list[json]`; Phase 1 rejects
+anything else.
 
 Edge kinds and their extra fields:
 

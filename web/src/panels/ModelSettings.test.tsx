@@ -50,6 +50,7 @@ const SETTINGS_BODY: SettingsResponse = {
     },
   ],
   resolvedDefault: { provider: 'deepseek-official', model: 'deepseek-v4-flash', source: 'bundle-default' },
+  maxTokensDefault: 8192,
   inheritedRoutes: 0,
   workspaceWritable: true,
 };
@@ -112,6 +113,7 @@ describe('ModelSettings', () => {
         model: 'gpt-6-astra',
         baseUrl: null,
         reasoningEffort: null,
+        maxTokens: null,
         hasApiKey: true,
         apiKeyHint: '…ab12',
       },
@@ -146,6 +148,7 @@ describe('ModelSettings', () => {
         baseUrl: null,
         apiKey: 'sk-typed',
         clearApiKey: false,
+        maxTokens: null,
       },
     });
   });

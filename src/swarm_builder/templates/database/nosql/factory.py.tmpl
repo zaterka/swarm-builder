@@ -1,0 +1,25 @@
+# --- swarm:db-kind-imports ---
+from $package.repositories.nosql import DocumentRepository, InMemoryDocumentRepository
+
+# --- swarm:db-kind-getters ---
+def get_document_repository(
+    seed_path: Path, collection: str | None = None
+) -> DocumentRepository:
+    """The document repository for one seed file: mock by default, MongoDB when live.
+
+    ``collection`` is the node's declared collection, which the mock ignores: a
+    mock instance *is* its one collection, keyed by the seed file's content.
+    Live mode honours it (falling back to ``SWARM_NOSQL_COLLECTION`` when the
+    caller passes nothing), because addressing the wrong collection there would
+    be a silent wrong answer.
+    """
+    if db_mode() == LIVE:
+        from $package.repositories.nosql import MongoRepository
+
+        return MongoRepository(
+            os.environ["SWARM_NOSQL_DSN"],
+            _live_collection(collection, "SWARM_NOSQL_COLLECTION"),
+        )
+    return _instance(
+        ("nosql", seed_key(seed_path)), lambda: InMemoryDocumentRepository(seed_path)
+    )

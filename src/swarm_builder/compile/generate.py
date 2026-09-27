@@ -51,6 +51,7 @@ from swarm_builder import runtime
 from swarm_builder.attachments.context import render_attachments_context
 from swarm_builder.attachments.models import LoadedAttachment
 from swarm_builder.compile.clarify import ClarifyAnswerIn
+from swarm_builder.compile.database import DATABASE_KINDS as _DATABASE_KINDS
 from swarm_builder.compile.review import Finding, review
 from swarm_builder.models import (
     AgentSpec,
@@ -75,6 +76,7 @@ from swarm_builder.models import (
     TemplateId,
 )
 from swarm_builder.slugify import slugify_titles
+from swarm_builder.templates.database import get_database_entry
 from swarm_builder.templates.registry import infer_template
 
 #: How many times a draft that fails materialization or review is sent back
@@ -109,6 +111,10 @@ STATE_FIELD_DEFAULTS: dict[PortType, str] = {
     "str": '""',
     "list[str]": "None",
     "json": "None",
+    # A list of rows cannot be defaulted to an empty literal source: `[]` would be
+    # one shared mutable default across every instance, so `None` is the only
+    # safe literal for a `list[json]` field nobody declared a default for.
+    "list[json]": "None",
 }
 
 DraftEdgeKind = Literal["seq", "branch", "fanout", "join", "delegate"]
@@ -154,6 +160,15 @@ class DraftNode(_DraftModel):
     delegates_to: list[str] = Field(
         default_factory=list,
         description="Orchestrator agents only: titles of child agent nodes called as tools.",
+    )
+    tools: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Agent nodes only: the read-only tools this agent may call -- either a "
+            "catalog tool name like web_search, or the title of a sql/nosql/vector node "
+            "in this draft. A database node named here is attached as a read-only tool "
+            "typed by its own declared ports; it is never given a query or a seed."
+        ),
     )
 
 
@@ -213,7 +228,23 @@ class GenerateResult:
 # ---------------------------------------------------------------------------
 
 _DISPATCH_KINDS: frozenset[str] = frozenset({"seq", "branch", "fanout", "join"})
-_STEP_KINDS: frozenset[str] = frozenset({"agent", "programmatic"})
+#: Kinds with a real, model-*independent* body. The database kinds are included so
+#: a drafted database node's ``reads``/``writes`` survive into the document, just
+#: as an agent's or a programmatic step's do; a decision routes and a join reduces,
+#: so neither has a body that could read or write anything.
+_STEP_KINDS: frozenset[str] = frozenset({"agent", "programmatic", "sql", "nosql", "vector"})
+
+
+def _lookup_title(title: str, index: dict[str, int]) -> int | None:
+    """The draft node a title names, or ``None`` when nothing matches.
+
+    Case-insensitive for the same reason :func:`_resolve_ref` is: a model that
+    writes ``orders`` for the node titled ``Orders`` means the same node.
+    """
+    key = title.strip()
+    if key in index:
+        return index[key]
+    return {k.lower(): v for k, v in index.items()}.get(key.lower())
 
 
 def _title_index(draft: GraphDraft) -> dict[str, int]:
@@ -234,13 +265,58 @@ def _title_index(draft: GraphDraft) -> dict[str, int]:
 
 
 def _resolve_ref(title: str, index: dict[str, int], what: str) -> int:
-    key = title.strip()
-    if key in index:
-        return index[key]
-    lowered = {k.lower(): v for k, v in index.items()}
-    if key.lower() in lowered:
-        return lowered[key.lower()]
-    raise DraftError(f"{what} refers to an unknown node title {title!r}")
+    position = _lookup_title(title, index)
+    if position is None:
+        raise DraftError(f"{what} refers to an unknown node title {title!r}")
+    return position
+
+
+def _resolve_tools(
+    node: DraftNode,
+    draft: GraphDraft,
+    index: dict[str, int],
+    ids: list[str],
+) -> list[str]:
+    """Resolve one agent's draft ``tools`` entries into ``AgentSpec.tools`` values.
+
+    An entry is either the **title** of a database node in the same draft -- which
+    becomes the namespaced ``<kind>:<id>`` form the emitter acts on, resolved
+    exactly as a ``delegatesTo`` title is -- or a catalog tool name such as
+    ``web_search``, which is kept verbatim.
+
+    Args:
+        node: The agent whose tools are being resolved.
+        draft: The whole draft (read for the node kinds).
+        index: The title index from :func:`_title_index`.
+        ids: The slugified ids, in draft node order.
+
+    Returns:
+        The resolved tool entries, in the order the draft listed them.
+
+    Raises:
+        DraftError: If an entry names a node of a kind that cannot be a tool. The
+            message is written for the model: a database node may be attached,
+            any other node kind may not, and silently keeping a bare title would
+            leave an agent asking for a tool nobody can emit.
+    """
+    resolved: list[str] = []
+    for entry in node.tools:
+        name = entry.strip()
+        if not name:
+            continue
+        position = _lookup_title(name, index)
+        if position is None:
+            resolved.append(name)
+            continue
+        kind = draft.nodes[position].kind
+        if kind not in _DATABASE_KINDS:
+            raise DraftError(
+                f"{node.title!r} lists {name!r} as a tool, but that node is a {kind!r} "
+                "node; a tool is either a catalog tool name (like web_search) or the "
+                "title of a sql, nosql or vector node"
+            )
+        resolved.append(f"{kind}:{ids[position]}")
+    return resolved
 
 
 def _normalize_edges(
@@ -437,7 +513,22 @@ def materialize(draft: GraphDraft, graph_id: str) -> SwarmGraph:
         }
         if node.kind == "agent":
             template = node.template or infer_template(node.intent).suggestion
-            delegates = [ids[_resolve_ref(t, index, "delegatesTo")] for t in node.delegates_to]
+            delegates: list[str] = []
+            for child_title in node.delegates_to:
+                position = _resolve_ref(child_title, index, "delegatesTo")
+                if kinds[position] in _DATABASE_KINDS:
+                    # The two ways to attach a database node sound alike ("give the
+                    # agent this data node"), and only ``tools`` is emitted: a
+                    # delegate child is rendered as ``_build_<id>(model)``, which a
+                    # database node has no agent module to satisfy. Naming the
+                    # correct field here is a repair round instead of a generated
+                    # project that fails to import.
+                    raise DraftError(
+                        f"{node.title!r} lists the {kinds[position]!r} node {child_title!r} "
+                        "in delegatesTo; a database node is attached as a read-only tool "
+                        "by listing its title in `tools` instead"
+                    )
+                delegates.append(ids[position])
             if delegates and template != "orchestrator":
                 template = "orchestrator"
             nodes.append(
@@ -447,6 +538,7 @@ def materialize(draft: GraphDraft, graph_id: str) -> SwarmGraph:
                     agent=AgentSpec(
                         instructions=(node.instructions or node.intent).strip() or titles[i],
                         delegates_to=delegates,
+                        tools=_resolve_tools(node, draft, index, ids),
                     ),
                 )
             )
@@ -463,6 +555,19 @@ def materialize(draft: GraphDraft, graph_id: str) -> SwarmGraph:
             nodes.append(
                 SwarmNode(**common, decision=DecisionSpec(branches=branches_by_decision.get(i, [])))
             )
+        elif node.kind in _DATABASE_KINDS:
+            # A drafted database node is materialized from its kind's *starter*:
+            # the spec (operation and seed) and the mandatory I/O pair are copied
+            # from the catalog, and the draft's own port declarations are ignored.
+            # The model therefore never authors a query, a seed or a port pair for
+            # a database node -- it chooses only that the node exists and which
+            # kind it is. A draft that needs another domain edits the node in the
+            # Inspector afterwards. A `template` on a database node is dropped for
+            # the same reason the Inspector hides it: templates are agent-only,
+            # and Phase 1 rejects a database node that carries one.
+            starter = get_database_entry(node.kind)
+            common["io"] = starter.starter_io.model_copy()
+            nodes.append(SwarmNode(**common, **{node.kind: starter.starter_spec.model_copy()}))
         else:
             nodes.append(SwarmNode(**common, join=JoinSpec(reducer=node.reducer or "list_append")))
 
@@ -547,7 +652,8 @@ Node kinds:
 - agent: an LLM step. Give it clear `instructions`. `template` is `chat`
   (default), `websearch` (needs live web results), or `orchestrator` (calls
   other agent nodes as tools; list their titles in `delegatesTo`, and do NOT
-  draw seq edges to those children).
+  draw seq edges to those children). `tools` lists what this agent may call: a
+  catalog tool name (like `web_search`) or the title of a database node below.
 - programmatic: plain Python with no model (parsing, formatting, calling an
   API, classifying by rule). Describe it precisely in `intent` and
   `signatureHint`; a coding model writes the body later.
@@ -561,12 +667,27 @@ Node kinds:
 - join: fan-in. Draw a `fanout` edge from the splitting node to each arm and
   a `join` edge from each arm into the join. `reducer` is list_append
   (default), list_extend, dict_update, or sum.
+- sql: read rows from a relational table.
+- nosql: read documents from one collection.
+- vector: similarity-search a document collection.
+
+The three database kinds are pre-built: each has `inputType` `str` and
+`outputType` `list[json]`, and its query, its filter and its example data are
+the starter's own (customers and orders, support tickets, product
+documentation). Name only what the node is *for* in `intent` -- never describe a
+schema, a query, a filter or sample rows, because the example is materialized
+into the node when it is created and is edited in the Inspector afterwards. An
+agent reaches a database node by listing that node's **title** in its `tools`
+(it then gets one read-only tool typed by that node's ports); a database node
+that nothing lists is still a normal step in the flow.
 
 Rules the reviewer enforces:
 - Titles are unique and short (they become Python identifiers).
 - Exactly one node has no incoming edge (the entry). No cycles.
 - Consecutive steps' types line up: a node's inputType equals its
-  predecessor's outputType. Port types are `str`, `json` (a dict), `list[str]`.
+  predecessor's outputType. Port types are `str`, `json` (a dict), `list[str]`,
+  and `list[json]` (a list of row objects, which is what a database node
+  returns).
 - A node lists in `writes` only state fields it sets, and in `reads` only
   fields some earlier node writes. Declare every field in `stateFields`.
 - Every node has a one-sentence `intent`.

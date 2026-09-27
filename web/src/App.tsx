@@ -58,6 +58,15 @@ export function App() {
   const applySaved = useGraphStore((s) => s.applySaved);
   const markSaveError = useGraphStore((s) => s.markSaveError);
   const toSavePayload = useGraphStore((s) => s.toSavePayload);
+  const loadDatabaseStarters = useGraphStore((s) => s.loadDatabaseStarters);
+
+  // App start, not workspace start: the database starter catalog describes what
+  // a node *kind* can be created as, so it is fetched once for the session and
+  // cached in the store. The call is idempotent, which makes it safe under
+  // StrictMode's double mount and lets the palette's Retry reuse it.
+  useEffect(() => {
+    void loadDatabaseStarters();
+  }, [loadDatabaseStarters]);
 
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryCountRef = useRef(0);

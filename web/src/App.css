@@ -160,6 +160,70 @@
 .sb-palette-item.sb-kind-join {
   --sb-kind-color: var(--sb-join);
 }
+.sb-palette-item.sb-kind-sql {
+  --sb-kind-color: var(--sb-sql);
+}
+.sb-palette-item.sb-kind-nosql {
+  --sb-kind-color: var(--sb-nosql);
+}
+.sb-palette-item.sb-kind-vector {
+  --sb-kind-color: var(--sb-vector);
+}
+
+/* The kind name and the server's own starter label on one row. The starter
+   label is what makes "SQL database" concrete ("SQL (customers and orders)");
+   it is absent until the catalog has loaded, which is exactly when the entry
+   is disabled. */
+.sb-palette-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sb-palette-item-starter {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--sb-text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Disabled, not hidden: the entry stays where the user expects it, and the
+   hint below the list says why it cannot be used yet. */
+.sb-palette-item-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  border-style: dashed;
+  box-shadow: none;
+}
+.sb-palette-item-disabled:hover,
+.sb-palette-item-disabled:active {
+  border-color: var(--sb-border-strong);
+  box-shadow: none;
+  transform: none;
+}
+.sb-palette-item-disabled::before {
+  background: var(--sb-border-strong);
+}
+
+.sb-palette-hint {
+  margin-top: 10px;
+  padding: 8px 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #6b4606;
+  background: var(--sb-warn-soft);
+  border: 1px solid var(--sb-warn-border);
+  border-left: 3px solid var(--sb-warn);
+  border-radius: var(--sb-r);
+}
+.sb-palette-hint button {
+  margin-top: 6px;
+}
 
 .sb-palette-item:hover {
   border-color: #bdb7aa;
@@ -173,6 +237,35 @@
 }
 
 /* ---------- Inspector ---------- */
+
+/* The starter/examples row at the top of a database node's fields, and the
+   inline error a JSON or number field shows instead of writing a value the
+   document's schema would reject. */
+.sb-db-starter {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  margin-bottom: 12px;
+  background: var(--sb-surface-2);
+  border: 1px solid var(--sb-border);
+  border-radius: var(--sb-r);
+}
+.sb-db-starter .sb-hint {
+  margin-top: 3px;
+}
+.sb-db-starter button {
+  flex: 0 0 auto;
+}
+
+.sb-field-error {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: #6f1d21;
+}
 
 .sb-inspector-tabs {
   display: inline-flex;

@@ -46,7 +46,7 @@ from swarm_builder.compile.clarify import ClarifyAnswerIn, ClarifyResult
 from swarm_builder.config import get_dsh_home, get_workspace_dir
 from swarm_builder.inherit.routes import UnmappableRouteError, build_live_model
 from swarm_builder.inherit.settings import EffectiveModel, resolve_effective_model
-from swarm_builder.known_models import default_max_output_tokens
+from swarm_builder.known_models import resolve_max_output_tokens
 from swarm_builder.models import ModelSelection, SwarmGraph
 from swarm_builder.routes.attachments import CODE_IMAGE_UNSUPPORTED
 from swarm_builder.routes.graphs import FindingOut
@@ -363,7 +363,9 @@ async def clarify_graph_route(body: ClarifyRequest) -> ClarifyResponse:
             body.description,
             model=model,
             attachments=attachments,
-            max_output_tokens=default_max_output_tokens(effective.model),
+            max_output_tokens=resolve_max_output_tokens(
+                effective.model, effective.max_tokens
+            ),
         )
     except UserError as exc:
         # Plain string details, matching /generate: the panel branches on the
@@ -448,8 +450,11 @@ async def generate_graph_route(body: GenerateGraphRequest) -> GenerateGraphRespo
             answers=_normalize_answers(body.answers),
             # A thinking model can spend a small provider default on thinking and
             # return no text at all; the rule (and the measurement behind it) is
-            # in known_models.default_max_output_tokens.
-            max_output_tokens=default_max_output_tokens(effective.model),
+            # in known_models.default_max_output_tokens, with the user's own
+            # Max output tokens setting winning via resolve_max_output_tokens.
+            max_output_tokens=resolve_max_output_tokens(
+                effective.model, effective.max_tokens
+            ),
         )
     except generate_module.GenerateError as exc:
         raise _map_generator_failure(exc) from exc

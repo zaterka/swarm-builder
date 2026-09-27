@@ -1,0 +1,97 @@
+"""The embedder the vector repository needs, and its deterministic default.
+
+``Embedder`` is a Protocol because the live adapter must accept whatever the
+user wires in -- a provider embedder, a local model, an HTTP service. The
+default is :class:`HashEmbedder`, and the reason it is a hash of character
+n-grams rather than a real model is the project's own keyless gate: it runs with
+no network and no model-cache download, so an embedder that fetched weights on
+first use would fail the gate that exists to prove the project runs unattended.
+
+Two properties of that default are load-bearing:
+
+- it is a *pure function of the text*, and it never uses ``hash()``, which Python
+  salts per process -- two runs of one graph must produce identical vectors and
+  therefore identical orderings;
+- it is L2-normalized, so cosine similarity between two documents is a plain dot
+  product.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+from typing import Protocol
+
+#: 256 dimensions: wide enough that unrelated blurbs rarely collide, small enough
+#: that a starter-sized seed index stays a few tens of kilobytes.
+DIMENSIONS = 256
+
+
+class Embedder(Protocol):
+    """Anything that maps text to a fixed-length vector."""
+
+    def embed(self, text: str) -> list[float]:
+        """Return the vector for one piece of text."""
+        ...
+
+
+class HashEmbedder:
+    """A deterministic character-n-gram hash embedder.
+
+    Texts that share character sequences land near each other, which is enough
+    for the mock to rank a query against a small seed sensibly and, more
+    importantly, *identically* on every run and every machine. It is not a
+    semantic model -- swap in a provider embedder for real recall, as the
+    generated README explains.
+    """
+
+    def __init__(self, dimensions: int = DIMENSIONS, ngram_size: int = 3) -> None:
+        if dimensions <= 0:
+            raise ValueError(f"dimensions must be positive, got {dimensions}")
+        if ngram_size <= 0:
+            raise ValueError(f"ngram_size must be positive, got {ngram_size}")
+        self.dimensions = dimensions
+        self.ngram_size = ngram_size
+
+    def embed(self, text: str) -> list[float]:
+        """Return the unit vector for ``text``."""
+        normalized = " ".join(text.lower().split())
+        if not normalized:
+            # No characters means no signal. A zero vector scores 0.0 against
+            # everything, which is an honest "nothing to match" -- and distinct
+            # from a vector built out of a hash of the empty string, which would
+            # make the empty query look similar to one arbitrary document.
+            return [0.0] * self.dimensions
+        vector = [0.0] * self.dimensions
+        for gram in _ngrams(normalized, self.ngram_size):
+            digest = hashlib.blake2b(gram.encode("utf-8"), digest_size=8).digest()
+            index = int.from_bytes(digest[:4], "big") % self.dimensions
+            # A *signed* contribution, so unrelated n-grams cancel each other out
+            # instead of all pushing in the same direction -- unsigned counting
+            # would make every pair of documents look moderately similar.
+            vector[index] += 1.0 if digest[4] % 2 else -1.0
+        return _normalize(vector)
+
+
+def _ngrams(text: str, size: int) -> list[str]:
+    """The character n-grams of one non-empty normalized string.
+
+    Callers lower-case and collapse whitespace first, so ``"Router,  X1"`` and
+    ``"router, x1"`` hash alike. Text shorter than ``size`` yields the text
+    itself, so a one-character query still embeds to something.
+    """
+    grams = [text[index : index + size] for index in range(len(text) - size + 1)]
+    return grams or [text]
+
+
+def _normalize(vector: list[float]) -> list[float]:
+    """Scale a vector to unit length, so a cosine is a dot product.
+
+    A zero vector (text made only of whitespace) is returned as zeros: it scores
+    0.0 against everything, which is an honest "no signal" rather than a
+    division by zero.
+    """
+    norm = math.sqrt(sum(component * component for component in vector))
+    if norm == 0.0:
+        return vector
+    return [component / norm for component in vector]

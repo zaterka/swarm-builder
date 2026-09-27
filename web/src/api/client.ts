@@ -10,6 +10,7 @@ import type {
   ClarifyRequest,
   ClarifyResponse,
   CompileSnapshot,
+  DatabaseStarterOut,
   DeleteGraphResponse,
   ExportResponse,
   GenerateGraphRequest,
@@ -71,6 +72,14 @@ export class ReviewUnavailableError extends ApiError {}
 /** GET /api/templates 503 -- swarm_builder.templates.registry could not
  * be imported. */
 export class TemplatesUnavailableError extends ApiError {}
+
+/** GET /api/database-starters 503 -- swarm_builder.templates.database could
+ * not be read (the module could not be imported, or one of the three
+ * ``starter.json`` files it loads at import is missing or malformed). The
+ * same transient/defensive state as `TemplatesUnavailableError`, and the same
+ * consequence for the caller: the three database palette entries stay
+ * disabled rather than creating a node nothing can materialize. */
+export class StartersUnavailableError extends ApiError {}
 
 /** PUT /api/settings 422 -- the submitted provider/model/key combination is
  * not usable. `detail` carries every problem found, so the form can show them
@@ -169,6 +178,21 @@ async function listTemplates(): Promise<TemplateEntryOut[]> {
   } catch (err) {
     if (err instanceof ApiError && err.status === 503) {
       throw new TemplatesUnavailableError(err.status, err.detail);
+    }
+    throw err;
+  }
+}
+
+/** The database starter catalog (`GET /api/database-starters`): one entry per
+ * kind, each carrying the default operation, example data and the mandatory
+ * I/O pair a new node is created from. Mirrors `listTemplates`'s 503 handling
+ * exactly, so both catalogs degrade into one named, catchable state. */
+async function listDatabaseStarters(): Promise<DatabaseStarterOut[]> {
+  try {
+    return await request<DatabaseStarterOut[]>('/database-starters');
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 503) {
+      throw new StartersUnavailableError(err.status, err.detail);
     }
     throw err;
   }
@@ -643,6 +667,7 @@ export const api = {
   putGraph,
   deleteGraph,
   listTemplates,
+  listDatabaseStarters,
   getModels,
   getSettings,
   putSettings,

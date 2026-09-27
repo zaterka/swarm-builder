@@ -1,0 +1,289 @@
+"""Row -> port coercion and SQL text helpers for this project's database nodes.
+
+Why one shared module instead of logic inline in each step body: three callers
+need exactly these functions -- the emitted step bodies and agent tools, and
+the repository adapters' own bound-parameter handling -- and three copies would
+drift apart on precisely the edge cases (an empty list, a NULL column, a
+literal percent sign) that only show up at run time.
+
+Nothing here touches a database or a driver, so this module is safe for the
+keyless gate to import.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+#: The four ``PortType`` labels, so an unknown label can be reported against
+#: the real set rather than guessed at.
+PORT_TYPES = ("str", "json", "list[str]", "list[json]")
+
+#: ``:name`` -- but never the second colon of a ``::type`` cast (the lookbehind
+#: rejects a preceding colon), never part of a longer identifier, and never the
+#: tail of ``:input_0`` when ``:input`` is meant (``\\b``).
+_NAMED_PLACEHOLDER_RE = re.compile(r"(?<![:\w]):([A-Za-z_]\w*)")
+
+#: The one placeholder a ``list[str]`` input is declared with. ``\\b`` keeps an
+#: already-expanded ``:input_0`` from matching.
+_INPUT_PLACEHOLDER_RE = re.compile(r"(?<![:\w]):input\b")
+
+
+def as_port(value: Any, port_type: str) -> Any:
+    """Coerce a step's value into the shape its declared port type promises.
+
+    The step bodies hand back whatever the repository returned, while
+    ``graph.py`` declares that node's port from the shared port-type table, so
+    the coercion has to happen once, here, rather than being re-derived in
+    every body. ``list[json]`` is the case that matters: a list of database
+    rows must arrive at the next node *as rows*, and everything inside it must
+    survive serialization, because the value crosses an edge. That is why
+    non-JSON leaves (a ``sqlite3`` BLOB, a ``Decimal``, a ``datetime``) are
+    converted rather than left to explode at the edge.
+
+    Args:
+        value: The value to coerce, normally straight from a repository.
+        port_type: One of :data:`PORT_TYPES`.
+
+    Returns:
+        The value in the shape ``port_type`` declares.
+
+    Raises:
+        ValueError: If ``port_type`` is not a known port type.
+        TypeError: If the value cannot be coerced to the requested port type
+            without inventing data (a scalar where a row mapping is required).
+    """
+    if port_type == "str":
+        return _as_text(value)
+    if port_type == "json":
+        return _as_json_object(value)
+    if port_type == "list[str]":
+        return _as_text_list(value)
+    if port_type == "list[json]":
+        return _as_row_list(value)
+    raise ValueError(f"unknown port type {port_type!r}; expected one of {PORT_TYPES}")
+
+
+def expand_list_param(sql: str, values: Sequence[Any]) -> tuple[str, dict[str, Any]]:
+    """Bind a ``list[str]`` input to one placeholder per value.
+
+    Neither SQLite nor psycopg can bind a *list* to a single placeholder, so a
+    ``list[str]``-parameterized query declares one ``:input`` and it is
+    expanded here into ``:input_0, :input_1, ...``. The rewritten SQL and its
+    parameters are returned as a pair because they are only meaningful
+    together, and returning both is what stops them from being rewritten at
+    different places and drifting.
+
+    Args:
+        sql: The query, containing exactly one ``:input`` placeholder.
+        values: The values the placeholder expands to.
+
+    Returns:
+        ``(sql_with_expanded_placeholders, params)``, ready to pass to a
+        repository's ``query()``. Run :func:`to_psycopg` afterwards, never
+        before.
+    """
+    items = list(values)
+    names = [f"input_{index}" for index in range(len(items))]
+    if not names:
+        # An empty list binds a single NULL placeholder. ``= NULL`` and
+        # ``IN (NULL)`` both match nothing, so an empty input reads as an empty
+        # result set instead of as a syntax error in a query the user could not
+        # have known was invalid.
+        return _expand_input_placeholder(sql, ["input_0"]), {"input_0": None}
+    return (
+        _expand_input_placeholder(sql, names),
+        dict(zip(names, items)),
+    )
+
+
+def to_psycopg(sql: str) -> str:
+    """Rewrite sqlite-style ``:name`` placeholders for psycopg (``%(name)s``).
+
+    Two rewrites in one pass, which is why this is not a pair of
+    ``str.replace`` calls: psycopg treats ``%`` as its own escape character, so
+    every literal percent sign has to be doubled -- a query containing
+    ``LIKE '%acme%'`` is invalid the moment it reaches the driver. Rewriting
+    the placeholders first and doubling only the text *between* them is what
+    keeps an inserted ``%(name)s`` from being doubled into ``%%(name)s``.
+
+    Documented limitations, both pinned by unit tests against a fixed corpus
+    rather than left to be discovered: a ``::type`` cast is left alone (the
+    rewrite never matches the second colon of a cast), and a ``:name`` inside a
+    string literal is rewritten like any other placeholder -- psycopg parses
+    the statement itself and leaves the literal text alone, so the right
+    parameters are still bound, but the literal shows the rewritten spelling.
+    For anything more exotic than this, prefer psycopg's own ``sql``
+    composition.
+
+    Args:
+        sql: A query using ``:name`` placeholders.
+
+    Returns:
+        The same query with ``%(name)s`` placeholders and doubled ``%``.
+    """
+    parts: list[str] = []
+    cursor = 0
+    for match in _NAMED_PLACEHOLDER_RE.finditer(sql):
+        parts.append(sql[cursor : match.start()].replace("%", "%%"))
+        parts.append(f"%({match.group(1)})s")
+        cursor = match.end()
+    parts.append(sql[cursor:].replace("%", "%%"))
+    return "".join(parts)
+
+
+#: The filter value that means "the upstream node's value". Spelled ``$$input``
+#: here because a literal dollar sign is escaped as ``$$`` in these templates.
+INPUT_SENTINEL: str = "$$input"
+
+
+def bind_input_filter(filter_: Any, value: Any) -> Any:
+    """Replace the ``$$input`` sentinel in a declared filter with ``value``.
+
+    A NoSQL node's filter says which documents to match; a filter *value* of the
+    literal string ``$$input`` means "the value the upstream node produced", which
+    is how a document expresses "match the field the input names" without carrying
+    an expression language inside JSON. The walk recurses through dicts and lists,
+    so the sentinel also works in an ``$$in`` value position
+    (``{"status": {"$$in": "$$input"}}`` with a ``list[str]`` input).
+
+    **Why the recursion matters, and why this lives here.** A top-level-only
+    substitution silently matches nothing in that ``$$in`` shape: the filter is
+    accepted, the query runs, and it returns ``[]`` -- a wrong answer rather than an
+    error. Each emitter used to carry its own version of this rule, one recursing
+    and one not, so the same document read its rows in one export and nothing in
+    the other; a single implementation in the shared repository layer is what makes
+    the two targets' parity checkable at all.
+    """
+    if isinstance(filter_, str):
+        return value if filter_ == INPUT_SENTINEL else filter_
+    if isinstance(filter_, dict):
+        return {key: bind_input_filter(item, value) for key, item in filter_.items()}
+    if isinstance(filter_, list):
+        return [bind_input_filter(item, value) for item in filter_]
+    return filter_
+
+
+def _expand_input_placeholder(sql: str, names: Sequence[str]) -> str:
+    """Replace the query's single ``:input`` with one placeholder per name."""
+    matches = list(_INPUT_PLACEHOLDER_RE.finditer(sql))
+    if not matches:
+        raise ValueError(
+            "a list input needs an ':input' placeholder in the query, and none was found"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            "a list input expands to one placeholder group, so ':input' may appear only "
+            f"once in the query (found {len(matches)})"
+        )
+    placeholders = ", ".join(f":{name}" for name in names)
+    return sql[: matches[0].start()] + placeholders + sql[matches[0].end() :]
+
+
+def _jsonable(value: Any) -> Any:
+    """A value the graph can serialize.
+
+    Bytes decode, containers recurse, and anything else falls back to ``str``:
+    a step's declared output type is a promise the step cannot renegotiate at
+    run time by raising, so an exotic leaf (a ``datetime``, a ``Decimal``) is
+    rendered rather than rejected.
+    """
+    if isinstance(value, str | bytes):
+        return value.decode("utf-8", "replace") if isinstance(value, bytes) else value
+    if value is None or isinstance(value, bool | int | float):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(item) for item in value]
+    return str(value)
+
+
+def _as_text(value: Any) -> str:
+    """A plain string, JSON-encoded for anything that is not already one.
+
+    ``None`` becomes ``"null"`` rather than the empty string: an empty string
+    is indistinguishable from a genuine empty answer, and JSON's spelling is
+    what the rest of this module uses for every other non-string leaf.
+    """
+    if isinstance(value, str):
+        return value
+    return json.dumps(_jsonable(value))
+
+
+def _as_json_object(value: Any) -> dict[str, Any]:
+    """One JSON object, from a mapping or from a JSON object *string*."""
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, str):
+        parsed = _parse_json(value, "json")
+        if isinstance(parsed, Mapping):
+            return {str(key): _jsonable(item) for key, item in parsed.items()}
+        raise TypeError(
+            f"a 'json' port needs a JSON object, and the string parsed to {type(parsed).__name__}"
+        )
+    raise TypeError(
+        f"a 'json' port needs a mapping or a JSON object string, got {type(value).__name__}"
+    )
+
+
+def _parse_json(value: str, port_type: str) -> Any:
+    """Parse a JSON string, reporting malformed text as the same ``TypeError``.
+
+    A caller handling a port-coercion failure should not have to catch two
+    exception types for "this is not the shape the port declares", and a
+    ``JSONDecodeError`` says nothing about the port.
+    """
+    try:
+        return json.loads(value)
+    except ValueError as error:  # json.JSONDecodeError is a ValueError
+        raise TypeError(
+            f"a {port_type!r} port could not parse the value as JSON: {error}"
+        ) from error
+
+
+def _as_text_list(value: Any) -> list[str]:
+    """A list of strings.
+
+    A bare string is *not* iterated: that would turn ``"abc"`` into
+    ``["a", "b", "c"]``, a silently wrong answer rather than a coercion.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list | tuple):
+        return [_as_text(item) for item in value]
+    return [_as_text(value)]
+
+
+def _as_row_list(value: Any) -> list[dict[str, Any]]:
+    """A list of row mappings, from a sequence, one mapping, or a JSON array."""
+    if value is None:
+        return []
+    if isinstance(value, Mapping):
+        return [_row(value)]
+    if isinstance(value, str):
+        parsed = _parse_json(value, "list[json]")
+        if isinstance(parsed, list | tuple):
+            return [_row(item) for item in parsed]
+        raise TypeError(
+            f"a 'list[json]' port needs a JSON array, and the string parsed to {type(parsed).__name__}"
+        )
+    if isinstance(value, list | tuple):
+        return [_row(item) for item in value]
+    raise TypeError(
+        f"a 'list[json]' port needs a list of row mappings or a JSON array string, got "
+        f"{type(value).__name__}"
+    )
+
+
+def _row(value: Any) -> dict[str, Any]:
+    """One row: a mapping, or the JSON object text of one."""
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, str):
+        parsed = _parse_json(value, "list[json]")
+        if isinstance(parsed, Mapping):
+            return {str(key): _jsonable(item) for key, item in parsed.items()}
+    raise TypeError(f"a 'list[json]' row must be a mapping, got {type(value).__name__}")

@@ -7,22 +7,37 @@ import, and validate/dry_run.py -- with an explicit UV_CACHE_DIR (fact
 spike/FINDINGS.md's reproduce script). Also proves the four negative
 fixtures are rejected by review.py (Phase 1), never reaching scaffold.
 
-Marked ``slow`` (registered in tests/conftest.py) since every positive
-fixture runs a real `uv sync`. Not deselected by default -- a bare
-``uv run pytest`` already exercises this suite, satisfying "make sure
-they actually run and pass at least once."
+The positive-fixture gate is marked ``slow`` (registered in
+tests/conftest.py) since it runs a real `uv sync`. Not deselected by
+default -- a bare ``uv run pytest`` already exercises this suite,
+satisfying "make sure they actually run and pass at least once."
+
+The file also carries the *no-database byte-identity* regression
+(PLAN-DB-NODES.md §9 acceptance 6): the whole tree both emitters produce
+for a document with no database node, compared against the snapshots
+``tests/golden/*.json`` captured from the tree *before* the feature
+landed. It needs no ``uv`` -- the comparison is renderer output against
+committed bytes -- so it is deliberately not slow.
 """
 
 from __future__ import annotations
 
 import ast
+import difflib
+import json
 import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from fixtures.graphs import NEGATIVE_FIXTURES, POSITIVE_FIXTURES, linear_chat_graph
+from fixtures.graphs import (
+    NEGATIVE_FIXTURES,
+    POSITIVE_FIXTURES,
+    fanout_join_graph,
+    linear_chat_graph,
+    websearch_graph,
+)
 from fixtures.stub_fill import apply_stub_fill
 from swarm_builder.compile import (
     body_marker_begin,
@@ -33,11 +48,15 @@ from swarm_builder.compile import (
 )
 from swarm_builder.compile.boundary import capture_baseline
 from swarm_builder.compile.fake_fill import _splice_region, stub_body_for
+from swarm_builder.compile.langgraph.models import to_langchain_model_source
+from swarm_builder.compile.langgraph.scaffold import scaffold_langgraph
 from swarm_builder.compile.review import review
 from swarm_builder.compile.scaffold import scaffold
+from swarm_builder.inherit.settings import EffectiveModel
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 UV_CACHE_DIR = REPO_ROOT / ".uv-cache"
+GOLDEN_DIR = REPO_ROOT / "tests" / "golden"
 
 #: Ambient credential env vars stripped for every keyless-gate subprocess,
 #: mirroring spike/FINDINGS.md's reproduce script exactly.
@@ -133,6 +152,133 @@ def test_negative_fixture_is_rejected_by_phase_one(fixture_name: str) -> None:
     graph = NEGATIVE_FIXTURES[fixture_name]()
     result = review(graph)
     assert not result.ok, f"negative fixture {fixture_name} was not rejected by Phase 1"
+
+
+# ---------------------------------------------------------------------------
+# No-database byte identity (PLAN-DB-NODES.md §9 acceptance 6).
+#
+# The database-node feature is gated on "does this document use a database node
+# at all": with none, no repository file, no seed, no optional dependency, no
+# `.env.example` line, no README section and no dry-run assertion may appear.
+# The goldens were captured from the pristine tree *before* the feature landed,
+# so they are evidence rather than a snapshot of the code under test -- a
+# whole-tree byte comparison is the only assertion that can catch an emission
+# that is merely *unused* rather than absent.
+# ---------------------------------------------------------------------------
+
+#: The three documents the goldens were captured from, and the fixed model route
+#: they were captured with. Every one of them is a document that must be
+#: unaffected, and both emitters are compared, so the guarantee is stated once
+#: per (target, fixture) pair rather than once for the pair that happens to be
+#: easiest to check.
+_GOLDEN_FIXTURES = (
+    ("linear_chat", linear_chat_graph),
+    ("fanout_join", fanout_join_graph),
+    ("websearch", websearch_graph),
+)
+
+
+def _golden_effective_model() -> EffectiveModel:
+    """The model route the goldens were captured with, restated exactly.
+
+    A different route would change the emitted ``deps.py``/``.env.example``, so
+    the route is part of the snapshot's precondition, not a detail.
+    """
+    return EffectiveModel(
+        provider="deepseek-official",
+        model="deepseek-flash",
+        reasoning_effort=None,
+        base_url=None,
+        api_key_env=None,
+        source="settings-default",
+        route=None,
+    )
+
+
+def _snapshot(root: Path) -> dict[str, str]:
+    """Every emitted file, relative POSIX path -> exact text content.
+
+    ``__pycache__`` is excluded: the scaffold's own golden-render subprocess
+    imports the project it just wrote, which writes ``.pyc`` files into the
+    generated tree. Those are a side effect of *checking* the tree, not part of
+    what is emitted, so comparing them would make this assertion about the
+    interpreter rather than about the emitters.
+    """
+    return {
+        path.relative_to(root).as_posix(): path.read_text()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
+def _golden_diff(golden: dict[str, str], actual: dict[str, str]) -> str:
+    """A readable report of every difference, or ``""`` when the trees match.
+
+    Per-file and classified, because the three classes mean different things: an
+    *added* path is a file the feature started emitting for a no-database
+    document (the exact regression this test exists for), a *removed* path is one
+    it stopped emitting, and a *changed* path is an emission that was edited. A
+    bare "trees differ" would send a reader diffing two 17-file trees by hand.
+    """
+    added = sorted(set(actual) - set(golden))
+    removed = sorted(set(golden) - set(actual))
+    changed = sorted(
+        path for path in set(golden) & set(actual) if golden[path] != actual[path]
+    )
+    if not (added or removed or changed):
+        return ""
+
+    lines: list[str] = []
+    for label, paths in (("added", added), ("removed", removed)):
+        if paths:
+            lines.append(f"{label}:")
+            lines += [f"  {path}" for path in paths]
+    for path in changed:
+        lines.append(f"changed: {path}")
+        diff = difflib.unified_diff(
+            golden[path].splitlines(),
+            actual[path].splitlines(),
+            fromfile="golden",
+            tofile="actual",
+            lineterm="",
+        )
+        lines += [f"  {line}" for line in diff]
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize(("fixture_name", "make_graph"), _GOLDEN_FIXTURES)
+@pytest.mark.parametrize("target", ["pydantic_graph", "langgraph"])
+def test_a_graph_without_a_database_node_emits_the_pre_change_tree(
+    target: str, fixture_name: str, make_graph, tmp_path: Path
+) -> None:
+    """A document with no database node must emit byte-identical output.
+
+    §9 acceptance 6, proved against ``tests/golden/*.json`` rather than against a
+    second run of the current code: the snapshots come from the commit before the
+    feature, so they can disagree with the implementation. Both targets and all
+    three captured fixtures are compared, because the gate that keeps a
+    no-database document unchanged lives in each emitter *and* in the shared
+    renderer, and one green fixture would not cover the others.
+    """
+    golden_name = f"no_db_{target}_{fixture_name}"
+    golden = json.loads((GOLDEN_DIR / f"{golden_name}.json").read_text())
+    project_dir = tmp_path / golden_name
+
+    if target == "langgraph":
+        scaffold_langgraph(
+            make_graph(), project_dir, to_langchain_model_source(_golden_effective_model())
+        )
+    else:
+        scaffold(make_graph(), project_dir, default_scaffold_model())
+
+    actual = _snapshot(project_dir)
+
+    assert _golden_diff(golden, actual) == "", (
+        f"{golden_name} no longer matches tests/golden/{golden_name}.json; "
+        "a document with no database node must emit exactly the tree it emitted "
+        "before database nodes existed.\n" + _golden_diff(golden, actual)
+    )
+    assert len(golden) > 0, "the golden snapshot is empty"
 
 
 # ---------------------------------------------------------------------------

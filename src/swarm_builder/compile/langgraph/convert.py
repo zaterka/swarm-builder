@@ -23,12 +23,13 @@ import logging
 from collections.abc import Callable
 from pathlib import Path
 
-from pydantic_ai import Agent, UsageLimits
+from pydantic_ai import Agent, ModelSettings, UsageLimits
 from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.models import Model
 
 from swarm_builder.compile.agent import (
     AGENT_RETRIES,
+    READ_TOOL_RETRIES,
     STEPS_DIR_PARTS,
     FillError,
     FillSession,
@@ -201,10 +202,16 @@ def build_convert_agent(
 ) -> Agent[None, str]:
     """Bind the four confined tools to a fresh agent (never at import time)."""
     agent: Agent[None, str] = Agent(
-        model, deps_type=type(None), instructions=instructions, retries=AGENT_RETRIES
+        model,
+        deps_type=type(None),
+        instructions=instructions,
+        retries=AGENT_RETRIES,
+        model_settings=ModelSettings(max_tokens=session.max_output_tokens)
+        if session.max_output_tokens
+        else None,
     )
-    agent.tool_plain(session.read_source_file)
-    agent.tool_plain(session.read_file)
+    agent.tool_plain(session.read_source_file, retries=READ_TOOL_RETRIES)
+    agent.tool_plain(session.read_file, retries=READ_TOOL_RETRIES)
     agent.tool_plain(session.write_region)
     agent.tool_plain(session.parse_check)
     return agent
@@ -250,6 +257,7 @@ async def convert(
         forbidden_directories=FORBIDDEN_DIRECTORIES,
         source_root=source_dir,
     )
+    session.max_output_tokens = getattr(live_model, "max_output_tokens", None)
     instructions = build_convert_instructions(
         project_dir,
         source_dir,

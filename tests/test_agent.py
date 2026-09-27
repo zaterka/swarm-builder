@@ -53,6 +53,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from fixtures.graphs import (
+    database_agent_tool_graph,
     decision_branching_graph,
     linear_chat_graph,
     mixed_programmatic_graph,
@@ -1144,3 +1145,76 @@ async def test_test_model_drives_the_bound_fill_agent(tmp_path: Path) -> None:
     assert session.written_node_ids == []
     assert step_path.read_text().count("# --- swarm:begin summarize ---") == 1
     assert sorted(p.name for p in project.rglob("*") if p.is_file()) == ["summarize.py"]
+
+
+# ---------------------------------------------------------------------------
+# agents/<id>.py: the read-only repository tools a database node becomes
+# (PLAN-DB-NODES.md §4.4)
+# ---------------------------------------------------------------------------
+
+
+def test_a_chat_agent_carries_the_database_tool_of_the_node_it_attaches(tmp_path: Path) -> None:
+    """An agent attaches a database node by naming it in ``agent.tools`` as
+    ``<kind>:<id>``, and the tool renders for the ``chat`` template too -- not only
+    for ``orchestrator``, which is where the delegate tools happen to live. The
+    signature is the *node's own* declared I/O, so the tool's return type is the
+    node's declared output type rather than ``_render_delegate_tool``'s hardcoded
+    ``str``.
+    """
+    from swarm_builder.compile import default_scaffold_model
+    from swarm_builder.compile.scaffold import scaffold
+
+    project = tmp_path / "project"
+    scaffold(database_agent_tool_graph(), project, default_scaffold_model())
+    source = (project / "src" / "swarm_workflow" / "agents" / "summarize_docs.py").read_text()
+
+    # Still exactly one agent factory, still returning the agent it built.
+    assert source.count("def build_agent(") == 1
+    assert source.count("return agent") == 1
+    assert "@agent.tool_plain" in source
+    assert "async def product_docs_search(query_text: str) -> list[dict[str, Any]]:" in source
+    # The docstring names the parameter and what it holds -- see `scaffold.py`'s
+    # `database_tool_parameter` for the real-model failure that pins this text.
+    assert "the closest documents with their scores" in source
+    assert "Pass query_text: the text to search for." in source
+    # Typed by the node's declared ports, seeded from the node's own seed file, and
+    # read-only: the declared operation is a search, and there is no free-form tool.
+    assert "from swarm_workflow.repositories import get_vector_repository" in source
+    assert "from swarm_workflow.repositories.portshape import as_port" in source
+    assert "PRODUCT_DOCS_SEED_PATH" in source
+    assert "PRODUCT_DOCS_COLLECTION = 'product_docs'" in source
+    assert "PRODUCT_DOCS_TOP_K = 4" in source
+    assert (
+        "repo = get_vector_repository(PRODUCT_DOCS_SEED_PATH, collection=PRODUCT_DOCS_COLLECTION)"
+        in source
+    )
+    assert (
+        "rows = repo.search(query_text, top_k=PRODUCT_DOCS_TOP_K, min_score=PRODUCT_DOCS_MIN_SCORE)"
+        in source
+    )
+    assert 'return as_port(rows, "list[json]")' in source
+    assert "upsert" not in source
+
+
+def test_a_catalog_tool_name_is_ignored_exactly_as_before(tmp_path: Path) -> None:
+    """``agent.tools`` keeps its existing members (``web_search``) and its existing
+    role as prompt metadata: only the namespaced form is acted on, so an agent whose
+    entries are all catalog names renders no tool at all."""
+    from swarm_builder.compile import default_scaffold_model
+    from swarm_builder.compile.scaffold import scaffold
+
+    graph = database_agent_tool_graph()
+    nodes = [
+        node.model_copy(
+            update={"agent": node.agent.model_copy(update={"tools": ["web_search"]})}
+        )
+        if node.agent is not None
+        else node
+        for node in graph.nodes
+    ]
+    project = tmp_path / "project"
+    scaffold(graph.model_copy(update={"nodes": nodes}), project, default_scaffold_model())
+    source = (project / "src" / "swarm_workflow" / "agents" / "summarize_docs.py").read_text()
+    assert "tool_plain" not in source
+    assert "repositories" not in source
+    assert "web_search" not in source

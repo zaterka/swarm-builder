@@ -35,8 +35,9 @@ from swarm_builder.store.graphs import (
 )
 from swarm_builder.store.projects import (
     ProjectStoreError,
-    delete_langgraph_project_dir,
-    delete_project_dir,
+    delete_langgraph_project_for_graph,
+    delete_project_for_graph,
+    rename_project_dirs,
 )
 
 router = APIRouter(tags=["graphs"])
@@ -221,11 +222,27 @@ def put_graph_route(graph_id: str, graph: SwarmGraph) -> SwarmGraph:
 
     workspace_dir = get_workspace_dir()
     try:
+        previous_name: str | None
+        try:
+            previous_name = get_graph(workspace_dir, graph_id).name
+        except GraphNotFoundError:
+            previous_name = None
         put_graph(workspace_dir, stamped)
     except InvalidGraphIdError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except GraphStoreError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    if previous_name is not None and previous_name != stamped.name:
+        # Best-effort: move an already-compiled project to the directory its
+        # new name implies. A failure leaves the old directory behind, and the
+        # marker scan still finds it for run/export until the next compile.
+        try:
+            rename_project_dirs(workspace_dir, graph_id, stamped.name)
+        except InvalidGraphIdError:
+            pass  # the name slug is safe by construction; ignore defensively
+        except ProjectStoreError:
+            pass  # renaming is cosmetic; a failure must not fail the save
 
     return stamped
 
@@ -245,7 +262,10 @@ def delete_graph_route(
     """
     workspace_dir = get_workspace_dir()
     try:
-        delete_graph(workspace_dir, graph_id)
+        # Read the name *before* deleting the document: the project directory
+        # is resolved from the marker (which stores the id), but the graph
+        # document is the only source of its name for the delete helpers.
+        graph = get_graph(workspace_dir, graph_id)
     except GraphNotFoundError as exc:
         raise HTTPException(
             status_code=404,
@@ -258,12 +278,21 @@ def delete_graph_route(
 
     if project:
         try:
-            delete_project_dir(workspace_dir, graph_id)
-            delete_langgraph_project_dir(workspace_dir, graph_id)
+            delete_project_for_graph(workspace_dir, graph_id, graph.name)
+            delete_langgraph_project_for_graph(workspace_dir, graph_id, graph.name)
         except InvalidGraphIdError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ProjectStoreError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    try:
+        delete_graph(workspace_dir, graph_id)
+    except GraphNotFoundError:
+        raise HTTPException(status_code=404, detail=f"graph {graph_id!r} not found") from None
+    except InvalidGraphIdError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except GraphStoreError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     return DeleteGraphResponse(deleted=True, project_deleted=project)
 

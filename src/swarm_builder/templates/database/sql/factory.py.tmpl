@@ -1,0 +1,19 @@
+# --- swarm:db-kind-imports ---
+from $package.repositories.sql import SqlRepository, SqliteRepository
+
+# --- swarm:db-kind-getters ---
+def get_sql_repository(seed_path: Path) -> SqlRepository:
+    """The SQL repository for one seed file: mock by default, Postgres when live.
+
+    ``seed_path`` is the node's *own* seed file, so the mock this returns is the
+    mock for that node's declared data -- two SQL nodes over one seed share one
+    database, and two over different seeds never do.
+    """
+    if db_mode() == LIVE:
+        # Lazy on purpose: psycopg is an optional extra (`uv sync --extra
+        # live-sql`), so importing it at module import time would break the
+        # keyless gate. This is the one documented degradation seam.
+        from $package.repositories.sql import PostgresRepository
+
+        return PostgresRepository(os.environ["SWARM_SQL_DSN"])
+    return _instance(("sql", seed_key(seed_path)), lambda: SqliteRepository(seed_path))

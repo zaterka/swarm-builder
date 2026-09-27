@@ -211,6 +211,7 @@ class EffectiveModel:
     ]
     route: RouteConfig | None
     api_key: str | None = field(default=None, repr=False)
+    max_tokens: int | None = None
 
 
 #: The last-resort selection: when neither a graph override, a
@@ -608,6 +609,7 @@ def resolve_effective_model(
             source="graph-override",
             route=route,
             api_key=api_key,
+            max_tokens=app_model.max_tokens if app_model is not None else None,
         )
 
     if app_model is not None:
@@ -621,6 +623,7 @@ def resolve_effective_model(
             source="app-config",
             route=route,
             api_key=app_model.api_key,
+            max_tokens=app_model.max_tokens,
         )
 
     default = (

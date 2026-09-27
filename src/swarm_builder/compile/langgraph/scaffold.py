@@ -33,6 +33,16 @@ other file -- and every other node module -- is complete as emitted.
   (``context_schema=Context`` on the builder, ``context=Context(model=...)``
   on ``ainvoke``), so the dry run can inject a keyless fake exactly as the
   pydantic-graph dry run injects ``TestModel``.
+- A ``sql``/``nosql``/``vector`` node is a complete deterministic node module,
+  never a conversion target: its body runs the operation its Inspector spec
+  declares, against the repository layer ``compile/database.py`` renders under
+  ``src/swarm_workflow_lg/repositories/``. The input arrives as ``inputs`` (the
+  ``PAYLOAD_KEY`` payload), exactly like every other node body, and the node
+  publishes the rows it read through ``writes["<field>"] = result``. An agent
+  that names a database node in ``agent.tools`` gets one read-only ``@tool``
+  for it, and that tool calls the *database node's own body function* -- so the
+  emitted project contains one copy of each declared operation and one copy of
+  the binding rule, not one per caller.
 """
 
 from __future__ import annotations
@@ -49,6 +59,17 @@ from swarm_builder.compile import (
     body_marker_end,
     imports_marker_begin,
     imports_marker_end,
+)
+from swarm_builder.compile.database import (
+    DATABASE_KINDS,
+    SEED_SUFFIX,
+    database_env_lines,
+    database_extra_lines,
+    database_files_for,
+    database_readme_section,
+    database_tool_description,
+    database_tool_parameter,
+    used_db_kinds,
 )
 from swarm_builder.compile.graph_ir import GraphStructure, analyze
 from swarm_builder.compile.langgraph import (
@@ -71,7 +92,14 @@ from swarm_builder.compile.scaffold import (
     _read_python_version_pin,
     _render_package_init,
 )
-from swarm_builder.models import PORT_TYPE_ANNOTATIONS, SwarmGraph, SwarmNode
+from swarm_builder.models import (
+    PORT_TYPE_ANNOTATIONS,
+    NosqlSpec,
+    SqlSpec,
+    SwarmGraph,
+    SwarmNode,
+    VectorSpec,
+)
 from swarm_builder.templates.registry import infer_template
 
 #: The body ``lg_convert`` must replace in every ``programmatic`` node.
@@ -92,6 +120,26 @@ _REDUCER_CHANNELS: dict[str, tuple[str, str, str]] = {
 }
 
 _BODY_INDENT = "    "
+
+#: The value a NoSQL node's filter uses to mean "the upstream node's value".
+#: Restated from the plan's binding rule: the sentinel lives in the *document*,
+#: so it is read back by the emitted module rather than by this scaffold.
+
+#: Database kinds whose read-only tool an agent can bind, keyed by the prefix
+#: ``agent.tools`` uses (``sql:<node_id>``). Deliberately the same set as
+#: :data:`~swarm_builder.compile.database.DATABASE_KINDS`: an entry whose prefix
+#: is not one of these is an ordinary catalog tool name (``web_search``) and is
+#: ignored exactly as it is today.
+_DATABASE_TOOL_PREFIXES: frozenset[str] = DATABASE_KINDS
+
+#: kind -> the repository getter the node's body calls, and the module it comes
+#: from. One row per kind so the emitted import line and the emitted call can
+#: never disagree.
+_REPOSITORY_GETTERS: dict[str, str] = {
+    "sql": "get_sql_repository",
+    "nosql": "get_document_repository",
+    "vector": "get_vector_repository",
+}
 
 
 @dataclass(frozen=True)
@@ -139,9 +187,17 @@ def scaffold_langgraph(
     write("pyproject.toml", _render_pyproject(graph, model_source))
     write(".python-version", _read_python_version_pin())
     write("README.md", _render_readme(graph, model_source))
-    write(".env.example", "\n".join(model_source.env_lines) + "\n")
+    write(".env.example", _render_env_example(graph, model_source))
     write(f"src/{PACKAGE_NAME}/__init__.py", _render_package_init())
     write(f"src/{PACKAGE_NAME}/nodes/__init__.py", _render_package_init())
+    # The repository layer -- Protocols, the seeded mocks, the lazily imported
+    # live adapters, the port helpers and one seed per database node. Rendered
+    # once by compile/database.py with *this* target's package name and placed
+    # here: the two targets share one template set rather than one copy each.
+    # With no database node the mapping is empty and nothing is written, which
+    # is what keeps a no-database tree byte-identical to the pre-database one.
+    for relative_path, content in database_files_for(graph, PACKAGE_NAME).items():
+        write(f"src/{PACKAGE_NAME}/{relative_path}", content)
     write(f"src/{PACKAGE_NAME}/state.py", _render_state(graph))
     write(f"src/{PACKAGE_NAME}/context.py", _render_context(model_source))
     write(f"src/{PACKAGE_NAME}/graph.py", emit_langgraph(graph, structure))
@@ -171,7 +227,7 @@ def _render_pyproject(graph: SwarmGraph, model_source: LangChainModelSource) -> 
     ]
     dep_lines = "\n".join(f'    "{dep}",' for dep in deps)
     description = graph.name.replace('"', "'")
-    return (
+    base = (
         "[project]\n"
         f'name = "{PACKAGE_NAME.replace("_", "-")}"\n'
         'version = "0.1.0"\n'
@@ -189,10 +245,49 @@ def _render_pyproject(graph: SwarmGraph, model_source: LangChainModelSource) -> 
         "[tool.hatch.build.targets.wheel]\n"
         f'packages = ["src/{PACKAGE_NAME}"]\n'
     )
+    # Appended, never interleaved: the ``[project]`` table and the wheel table
+    # above are byte-identical for a document with no database node, and a
+    # project without one never grows an empty table. TOML allows this table
+    # after ``[tool.hatch...]`` -- ``[project.optional-dependencies]`` is its
+    # own key, and ``[project]`` itself is neither reopened nor repeated.
+    return base + _database_optional_dependencies(graph)
+
+
+def _database_optional_dependencies(graph: SwarmGraph) -> str:
+    """The ``[project.optional-dependencies]`` table, or ``""`` when unused.
+
+    The live drivers are extras, never base dependencies: a plain ``uv sync``
+    must install none of them, which is what keeps the keyless gate's import
+    honest. The body (one ``live-<kind>`` line per *used* kind) comes from
+    ``compile/database.py``, so the extra names here and the
+    ``uv sync --extra ...`` commands in the README cannot drift apart.
+    """
+    lines = database_extra_lines(graph)
+    if not lines:
+        return ""
+    return "\n[project.optional-dependencies]\n" + "\n".join(lines) + "\n"
+
+
+def _render_env_example(graph: SwarmGraph, model_source: LangChainModelSource) -> str:
+    """Render ``.env.example``: the model route, then the database variables.
+
+    The model lines are emitted exactly as before for a document with no
+    database node (same lines, same order, same trailing newline); the database
+    lines are *appended* behind a blank line, and only the used engines'
+    variables appear -- a ``SWARM_VECTOR_DSN`` in a project with no vector node
+    would suggest a driver nothing in this workflow can reach.
+    """
+    database_lines = database_env_lines(graph)
+    # A blank separator only when there is something on both sides of it -- the
+    # same rule the pydantic-graph emitter applies, so one document's two exports
+    # cannot disagree about the shape of this file.
+    separator = ("",) if database_lines and model_source.env_lines else ()
+    lines = [*model_source.env_lines, *separator, *database_lines]
+    return "\n".join(lines) + "\n"
 
 
 def _render_readme(graph: SwarmGraph, model_source: LangChainModelSource) -> str:
-    return (
+    base = (
         f"# {PACKAGE_NAME} ({graph.name}) -- LangGraph export\n"
         "\n"
         "Generated by Swarm Builder from the validated PydanticAI project of the\n"
@@ -235,6 +330,13 @@ def _render_readme(graph: SwarmGraph, model_source: LangChainModelSource) -> str
         "Known limitation: a `websearch` agent node is emitted as a plain chat call.\n"
         "Bind a search tool in its node body (`model.bind_tools([...])`) for live results.\n"
     )
+    # The database section is the shared text both targets append, so the file
+    # to edit, the variables and the `uv sync --extra ...` commands are stated
+    # once. Nothing is appended for a document with no database node.
+    section = database_readme_section(graph)
+    if not section:
+        return base
+    return f"{base}\n{section}"
 
 
 # ---------------------------------------------------------------------------
@@ -427,12 +529,24 @@ def _return_line(graph: SwarmGraph, node: SwarmNode) -> str:
     return f'    return {{**writes, "{PAYLOAD_KEY}": output}}'
 
 
-def _default_agent_body(graph: SwarmGraph, node: SwarmNode) -> list[str]:
+def _default_agent_body(
+    graph: SwarmGraph, node: SwarmNode, database_tools: tuple[SwarmNode, ...] = ()
+) -> list[str]:
     """Deterministic agent body: one chat call, output coerced to the port type.
 
-    An orchestrator additionally wraps each delegated child as a ``@tool``
-    and runs a bounded tool loop -- pure LangChain model/tool primitives,
-    no ``create_agent``/``create_react_agent``.
+    An orchestrator additionally wraps each delegated child as a ``@tool``, and
+    any agent may wrap each database node it names in ``agent.tools`` as a
+    read-only ``@tool``. Both kinds of tool are bound with
+    ``model.bind_tools([...])`` and driven by the same bounded tool loop -- pure
+    LangChain model/tool primitives, no
+    ``create_agent``/``create_react_agent``.
+
+    Args:
+        graph: The document being emitted (kept in the signature alongside
+            :func:`render_node_module`'s other body renderers).
+        node: The agent node.
+        database_tools: The database nodes this agent may call, in the order
+            ``agent.tools`` declares them (:func:`database_tool_targets`).
     """
     instructions = node.agent.instructions if node.agent else node.intent
     template = node.template or infer_template(node.intent).suggestion
@@ -450,6 +564,8 @@ def _default_agent_body(graph: SwarmGraph, node: SwarmNode) -> list[str]:
         )
     else:
         body.append("    user_text = str(inputs)")
+
+    tool_names: list[str] = []
     if template == "orchestrator" and delegates:
         for child in delegates:
             body.extend(
@@ -461,7 +577,13 @@ def _default_agent_body(graph: SwarmGraph, node: SwarmNode) -> list[str]:
                     f"        return str(await {child}_body(query, state, model, {{}}))",
                 ]
             )
-        tools = ", ".join(delegates)
+        tool_names.extend(delegates)
+    for database_node in database_tools:
+        body.extend(_database_tool_lines(database_node))
+        tool_names.append(database_tool_name(database_node))
+
+    if tool_names:
+        tools = ", ".join(tool_names)
         body.extend(
             [
                 "",
@@ -489,13 +611,408 @@ def _default_agent_body(graph: SwarmGraph, node: SwarmNode) -> list[str]:
     return body
 
 
+def database_tool_name(node: SwarmNode) -> str:
+    """The name of the read-only tool an agent gets for database node ``node``.
+
+    ``<node_id>_query`` for SQL and NoSQL, ``<node_id>_search`` for a vector
+    node. Node ids are unique and already valid Python identifiers, so the id
+    prefix is what keeps the emitted function names unique inside one agent
+    module and needs no sanitization.
+    """
+    return f"{node.id}_search" if node.kind == "vector" else f"{node.id}_query"
+
+
+def database_tool_targets(graph: SwarmGraph, node: SwarmNode) -> tuple[SwarmNode, ...]:
+    """The database nodes ``node``'s agent may call, in declaration order.
+
+    Only the *namespaced* entries of ``agent.tools`` are acted on --
+    ``sql:<node_id>`` / ``nosql:<node_id>`` / ``vector:<node_id>``. An entry with
+    no ``<kind>:`` prefix is a catalog tool name (``web_search``) and stays
+    prompt metadata, exactly as before database nodes existed.
+
+    An entry naming a node that does not exist, one of another kind, or one whose
+    declared operation *writes* is not acted on. All three are Phase 1 findings
+    (``db_tool_unknown_node``, ``db_write_as_tool``), and a deterministic emitter
+    that runs on an already-validated document must not turn a validation finding
+    into a crash -- the same reading the pydantic-graph emitter takes. Skipping a
+    write-declared node is also what keeps a model-reachable write impossible
+    here: this target's tool calls the node's *own* body, which for such a node
+    is the ``execute``/``insert_one`` path, so there is no read variant of it to
+    offer instead.
+
+    Duplicate entries collapse to one tool: the declaration is identical, so
+    emitting it twice would only repeat an import and a function definition.
+
+    Args:
+        graph: The document the agent belongs to.
+        node: The agent node (any other kind yields no tools).
+
+    Returns:
+        The database nodes to emit one read-only tool for, in order.
+    """
+    if node.kind != "agent" or node.agent is None:
+        return ()
+    node_by_id = {candidate.id: candidate for candidate in graph.nodes}
+    targets: list[SwarmNode] = []
+    seen: set[str] = set()
+    for entry in node.agent.tools:
+        kind, separator, target_id = entry.partition(":")
+        if not separator or kind not in _DATABASE_TOOL_PREFIXES:
+            continue  # a catalog tool name such as `web_search`
+        target = node_by_id.get(target_id)
+        if target is None or target.kind != kind or target.id in seen:
+            continue
+        if _database_operation_writes(target):
+            continue
+        seen.add(target.id)
+        targets.append(target)
+    return tuple(targets)
+
+
+def _database_operation_writes(node: SwarmNode) -> bool:
+    """Whether ``node``'s declared operation writes (so it cannot be a tool).
+
+    Phase 1's ``db_write_as_tool`` is the rule; this is the same declaration read
+    again at emission time, so a write-declared node can never be wrapped as a
+    tool even if the document reaches the emitter unvalidated.
+    """
+    if node.kind == "sql" and node.sql is not None:
+        return bool(node.sql.write)
+    if node.kind == "nosql" and node.nosql is not None:
+        return node.nosql.operation == "insert_one"
+    return False
+
+
+def _database_tool_lines(node: SwarmNode) -> list[str]:
+    """One read-only ``@tool`` for ``node``, as body lines.
+
+    The tool calls the database node's *own* body function rather than
+    re-deriving the operation and its parameter binding. That keeps one copy of
+    each declared operation in the project (the node module), makes the tool's
+    value exactly the step's value, and matches how an orchestrator already
+    calls a delegated child's body. ``writes`` is a throwaway dict: a tool
+    answers the model, it does not publish state.
+    """
+    name = database_tool_name(node)
+    annotation = PORT_TYPE_ANNOTATIONS[node.io.input_type]
+    output = PORT_TYPE_ANNOTATIONS[node.io.output_type]
+    spec = _database_spec(node)
+    # The parameter name and the docstring come from the shared renderer, so both
+    # targets describe *what the argument is bound to* identically. A parameter
+    # called `query` with a docstring about "the declared read query" made a real
+    # model pass a SQL statement, which the tool bound as the declared parameter
+    # and matched nothing -- a silent empty result (see database_tool_parameter).
+    value_name, guidance = database_tool_parameter(node, spec)
+    description = database_tool_description(node, spec, value_name, guidance)
+    return [
+        "",
+        "    @tool",
+        f"    async def {name}({value_name}: {annotation}) -> {output}:",
+        f"        {description!r}",
+        f"        return await {node.id}_body({value_name}, state, model, {{}})",
+    ]
+
+
+def _nosql_binds_a_filter(node: SwarmNode) -> bool:
+    """Whether this node's emitted body reads a declared filter.
+
+    False only for an ``insert_one`` write, which takes its document from the input
+    and binds no filter, so the node module must not import the binding helper.
+    ``scaffold.py`` has the read-only-aware twin of this predicate for its tool
+    path; both are one line and describe the same emitted dispatch.
+    """
+    if node.kind != "nosql" or node.nosql is None:
+        return False
+    return node.nosql.operation != "insert_one"
+
+
 def _coerce_expression(port_type: str) -> str:
     """Turn ``reply.text`` into the declared output port type, safely."""
     if port_type == "json":
         return "_parse_json_reply(reply.text)"
+    if port_type == "list[json]":
+        return "_parse_json_rows_reply(reply.text)"
     if port_type == "list[str]":
         return "[line.strip() for line in reply.text.splitlines() if line.strip()]"
     return "reply.text"
+
+
+def _parse_json_rows_helper_lines() -> list[str]:
+    """The ``list[json]`` reply coercion, emitted only where it is used.
+
+    A sibling of ``_parse_json_reply`` rather than a call into the generated
+    ``repositories/portshape.py``: a document with no database node has no
+    repositories package, and a ``list[json]`` *agent* output is legal on its
+    own. Emitted only for an agent whose declared output is ``list[json]``, so
+    every other node module is byte-identical to what it was before ``list[json]``
+    existed.
+    """
+    return [
+        "",
+        "",
+        "def _parse_json_rows_reply(text: str) -> list[dict[str, Any]]:",
+        '    """Best-effort JSON array of rows from a model reply."""',
+        "    try:",
+        "        value = json.loads(text)",
+        "    except ValueError:",
+        '        return [{"text": text}]',
+        "    if isinstance(value, list):",
+        '        return [item if isinstance(item, dict) else {"value": item} for item in value]',
+        '    return [value if isinstance(value, dict) else {"value": value}]',
+    ]
+
+
+# ---------------------------------------------------------------------------
+# nodes/<id>.py -- a database node's body
+#
+# The body is complete and deterministic, exactly like a join or decision
+# body: a database node's value is *declared data* (its Inspector spec), so
+# nothing here is model-authored and lg_convert never receives the module.
+# ---------------------------------------------------------------------------
+
+
+#: kind -> the input port types this emitter can bind.
+#:
+#: This mirrors the plan's per-kind binding table, which is deliberately wider
+#: than Phase 1's gate: Phase 1 rejects ``list[str]`` for both SQL and NoSQL
+#: (``db_input_type_unsupported``), but the binding rule for those pairs exists
+#: and is emitted here, so a document that reaches this renderer with one of
+#: them is emitted correctly rather than crashing. The cells the plan marks
+#: *rejected* -- ``list[json]`` for every kind, ``list[str]`` for vector -- are
+#: absent, and a node declaring one raises.
+_DATABASE_BINDABLE_INPUTS: dict[str, tuple[str, ...]] = {
+    "sql": ("str", "json", "list[str]"),
+    "nosql": ("str", "json", "list[str]"),
+    "vector": ("str", "json"),
+}
+
+
+def _database_spec(node: SwarmNode) -> SqlSpec | NosqlSpec | VectorSpec:
+    """The node's declared spec, or a loud failure naming the node.
+
+    Phase 1 rejects a database node with no spec (``db_empty_operation``) long
+    before any emitter runs, so this guards the case where a renderer is called
+    directly on an unvalidated document: emitting a body that reads nothing
+    would be a silently wrong node.
+    """
+    spec: SqlSpec | NosqlSpec | VectorSpec | None = None
+    if node.kind == "sql":
+        spec = node.sql
+    elif node.kind == "nosql":
+        spec = node.nosql
+    elif node.kind == "vector":
+        spec = node.vector
+    if spec is None:
+        raise ValueError(
+            f"{node.kind} node {node.id!r} carries no {node.kind!r} spec, so it declares "
+            "no operation to emit (Phase 1 reports this as db_empty_operation)"
+        )
+    return spec
+
+
+def _unsupported_input(node: SwarmNode) -> ValueError:
+    """The error for a database node whose declared input has no binding rule."""
+    expected = ", ".join(repr(item) for item in _DATABASE_BINDABLE_INPUTS[node.kind])
+    return ValueError(
+        f"{node.kind} node {node.id!r} declares input_type {node.io.input_type!r}, which "
+        f"has no binding rule (expected one of {expected}); Phase 1 reports this as "
+        "db_input_type_unsupported"
+    )
+
+
+def _database_import_lines(node: SwarmNode) -> list[str]:
+    """The imports a database node module needs, in the generated region.
+
+    The generated region, not the ``imports`` marker region: the conversion
+    agent owns the marker regions of ``programmatic`` nodes, and a database
+    node is never converted -- so these lines must not be somewhere an agent's
+    ``write_region`` could replace them. This mirrors how an orchestrator's
+    ``<child>_body`` imports are emitted.
+    """
+    getter = _REPOSITORY_GETTERS[node.kind]
+    portshape = ["as_port"]
+    if node.kind == "sql" and node.io.input_type == "list[str]":
+        # The one binding that rewrites the query text before it is run.
+        portshape.append("expand_list_param")
+    elif node.kind == "nosql" and _nosql_binds_a_filter(node):
+        # The sentinel binding is a *shared* rule (see
+        # ``templates/database/portshape.py.tmpl``): the pydantic-graph emitter calls
+        # the same function, so the two targets cannot disagree about what a
+        # declared filter selects -- they did, and one of them silently returned no
+        # rows for an ``$in`` shape. Skipped for a write, which binds no filter.
+        portshape.append("bind_input_filter")
+    return [
+        f"from {PACKAGE_NAME}.repositories import {getter}",
+        f"from {PACKAGE_NAME}.repositories.portshape import {', '.join(portshape)}",
+    ]
+
+
+def _database_constant_lines(node: SwarmNode) -> list[str]:
+    """The module-level constants a database node's body reads, plus its note.
+
+    They sit *outside* the body markers because the operation and the seed path
+    are part of the node's declaration rather than of its implementation: the
+    Inspector shows the same values, and a recompile regenerates both from the
+    document. ``note`` becomes the comment above them.
+    """
+    spec = _database_spec(node)
+    lines: list[str] = []
+    if spec.note and spec.note.strip():
+        lines.extend(f"# {line}" for line in spec.note.strip().splitlines())
+    # The seed file compile/database.py renders for this node, addressed from
+    # the node module's own location (``nodes/`` -> the package root). The
+    # suffix comes from that module's map rather than being derived here, so a
+    # seed path can never name a file the emitter did not write.
+    suffix = SEED_SUFFIX[node.kind]
+    lines.append(
+        'SEED_PATH = Path(__file__).resolve().parent.parent / "repositories" / "seed" / '
+        f'"{node.id}.{suffix}"'
+    )
+    if isinstance(spec, SqlSpec):
+        lines.append(f"SQL_QUERY = {spec.query!r}")
+    elif isinstance(spec, NosqlSpec):
+        lines.append(f"COLLECTION = {spec.collection!r}")
+        lines.append(f"FILTER = {spec.filter!r}")
+        lines.append(f"LIMIT = {spec.limit!r}")
+    else:
+        lines.append(f"COLLECTION = {spec.collection!r}")
+        lines.append(f"TOP_K = {spec.top_k!r}")
+        lines.append(f"MIN_SCORE = {spec.min_score!r}")
+    return lines
+
+
+def _database_node_body(node: SwarmNode) -> list[str]:
+    """The complete deterministic body of a database node, as body lines.
+
+    Never :data:`UNCONVERTED_BODY_SENTINEL`: the operation, its parameters and
+    the port coercion are all declared in the document, and the emitted call
+    runs exactly that. The value the previous node produced arrives as
+    ``inputs`` (the ``PAYLOAD_KEY`` payload) and is the only parameter source;
+    rows are coerced into the declared ``list[json]`` port so they stay rows
+    when they cross the next edge; and the result is published through
+    ``writes["<field>"]`` exactly like every other node body.
+    """
+    spec = _database_spec(node)
+    if isinstance(spec, SqlSpec):
+        lines = _sql_body(node, spec)
+    elif isinstance(spec, NosqlSpec):
+        lines = _nosql_body(node, spec)
+    else:
+        lines = _vector_body(node, spec)
+    for field in node.writes:
+        lines.append(f'    writes["{field}"] = result')
+    lines.append("    return result")
+    return lines
+
+
+def _sql_body(node: SwarmNode, spec: SqlSpec) -> list[str]:
+    """Bind, run and coerce one SQL node's declared operation.
+
+    One binding rule per declared input type, and no guessing: ``str`` binds
+    ``:input``, ``json`` binds the dict's own keys plus ``:input`` for the whole
+    dict, and ``list[str]`` expands a single ``:input`` into
+    ``:input_0, :input_1, …`` (SQLite cannot bind a list to one placeholder).
+    """
+    input_type = node.io.input_type
+    prelude: list[str] = []
+    query = "SQL_QUERY"
+    if input_type == "str":
+        params = '{"input": inputs}'
+    elif input_type == "json":
+        prelude.append('    values = as_port(inputs, "json")')
+        params = '{**values, "input": values}'
+    elif input_type == "list[str]":
+        prelude.append(
+            '    sql, params = expand_list_param(SQL_QUERY, as_port(inputs, "list[str]"))'
+        )
+        query, params = "sql", "params"
+    else:
+        raise _unsupported_input(node)
+    lines = [*prelude, "    repo = get_sql_repository(SEED_PATH)"]
+    if spec.write:
+        # The declared write path, and only because the Inspector said
+        # `write: true`: no agent tool can reach it (an agent may not name a
+        # write node), so no model-authored statement ever arrives here. The
+        # declared output port is still `list[json]`, so the affected-row count
+        # is published as one row -- the same row this target's pydantic-graph
+        # counterpart emits.
+        lines.append(f"    affected = repo.execute({query}, {params})")
+        lines.append('    result = as_port([{"rows_affected": affected}], "list[json]")')
+    else:
+        lines.append(f"    rows = repo.query({query}, {params})")
+        lines.append('    result = as_port(rows, "list[json]")')
+    return lines
+
+
+def _nosql_body(node: SwarmNode, spec: NosqlSpec) -> list[str]:
+    """Bind, run and coerce one NoSQL node's declared operation."""
+    input_type = node.io.input_type
+    if spec.operation == "insert_one":
+        if input_type not in ("str", "json"):
+            raise _unsupported_input(node)
+        # The document is the input itself when the input is a mapping, and a
+        # one-key document otherwise: a write node's only declared parameter
+        # source is the value the previous node produced.
+        return [
+            "    repo = get_document_repository(SEED_PATH, COLLECTION)",
+            "    document = inputs if isinstance(inputs, dict) else {"
+            + '"value": inputs}',
+            "    inserted_id = repo.insert_one(document)",
+            '    result = as_port([{"id": inserted_id}], "list[json]")',
+        ]
+    prelude: list[str] = []
+    if input_type == "str":
+        bound_filter = "bind_input_filter(FILTER, inputs)"
+    elif input_type == "json":
+        # The keys merge over the filter's top level, and a `$input` sentinel
+        # that survives that merge still means "the whole input".
+        prelude.append('    values = as_port(inputs, "json")')
+        bound_filter = "bind_input_filter({**FILTER, **values}, values)"
+    elif input_type == "list[str]":
+        bound_filter = 'bind_input_filter(FILTER, as_port(inputs, "list[str]"))'
+    else:
+        raise _unsupported_input(node)
+    lines = [*prelude, "    repo = get_document_repository(SEED_PATH, COLLECTION)"]
+    if spec.operation == "find_one":
+        # The port is `list[json]` for every database kind, so a single
+        # document is published as a list of zero or one row rather than as
+        # one row: the shape the next node declared is the shape it gets.
+        lines.append(f"    row = repo.find_one({bound_filter})")
+        lines.append('    result = as_port([row] if row is not None else [], "list[json]")')
+    elif spec.operation == "count":
+        lines.append(f"    count = repo.count({bound_filter})")
+        lines.append('    result = as_port([{"count": count}], "list[json]")')
+    else:  # find
+        lines.append(f"    rows = repo.find({bound_filter}, limit=LIMIT)")
+        lines.append('    result = as_port(rows, "list[json]")')
+    return lines
+
+
+def _vector_body(node: SwarmNode, spec: VectorSpec) -> list[str]:
+    """Bind, run and coerce one vector node's declared search."""
+    input_type = node.io.input_type
+    repo = "    repo = get_vector_repository(SEED_PATH, COLLECTION)"
+    if input_type == "str":
+        # The input *is* the query text; a non-string is not coerced into one,
+        # because hashing something that is not text would answer a question
+        # nobody asked.
+        return [
+            repo,
+            "    rows = repo.search(inputs, top_k=TOP_K, min_score=MIN_SCORE)",
+            '    result = as_port(rows, "list[json]")',
+        ]
+    if input_type != "json":
+        raise _unsupported_input(node)
+    return [
+        '    options = as_port(inputs, "json")',
+        repo,
+        "    rows = repo.search(",
+        '        as_port(options["query"], "str"),',
+        '        top_k=int(options.get("top_k", TOP_K)),',
+        "        min_score=MIN_SCORE,",
+        "    )",
+        '    result = as_port(rows, "list[json]")',
+    ]
 
 
 def _decision_lines(node: SwarmNode) -> list[str]:
@@ -530,12 +1047,26 @@ def render_node_module(graph: SwarmGraph, structure: GraphStructure, node: Swarm
     """Render ``nodes/<id>.py`` for any node kind.
 
     Programmatic bodies carry :data:`UNCONVERTED_BODY_SENTINEL` for
-    ``lg_convert`` to replace; every other kind is complete.
+    ``lg_convert`` to replace; every other kind is complete, including the three
+    database kinds, whose bodies run the operation their spec declares.
+
+    Raises:
+        ValueError: If the node is a database node with no spec, or one whose
+            input port type the binding rules cannot supply. Both are Phase 1
+            findings, so reaching here means a renderer was called on an
+            unvalidated document -- and a database node with no spec is not a
+            finding about a *tool entry* but about the node itself, which is why
+            it is refused rather than skipped.
     """
     in_ann = PORT_TYPE_ANNOTATIONS[node.io.input_type]
     out_ann = PORT_TYPE_ANNOTATIONS[node.io.output_type]
     is_agent = node.kind == "agent"
+    is_database = node.kind in DATABASE_KINDS
     is_orchestrator = is_agent and bool(node.agent and node.agent.delegates_to)
+    # One read-only tool per `sql:<id>`-style entry, resolved once: the header
+    # imports what the body calls, so both have to agree on the same set.
+    database_tools = database_tool_targets(graph, node)
+    needs_tool_import = is_orchestrator or bool(database_tools)
 
     # Same delimiter/escaping as the pydantic-graph step modules: an intent
     # holding a quote must not be able to terminate the docstring early.
@@ -546,14 +1077,15 @@ def render_node_module(graph: SwarmGraph, structure: GraphStructure, node: Swarm
         "from __future__ import annotations",
         "",
         "import json",
+        *(("from pathlib import Path",) if is_database else ()),
         "from typing import Any",
         "",
         imports_marker_begin(node.id),
     ]
     if is_agent:
         header.append("from langchain.messages import HumanMessage, SystemMessage")
-        if is_orchestrator:
-            header.append("from langchain.tools import tool")
+    if needs_tool_import:
+        header.append("from langchain.tools import tool")
     header.append(imports_marker_end(node.id))
     header.extend(
         [
@@ -562,14 +1094,24 @@ def render_node_module(graph: SwarmGraph, structure: GraphStructure, node: Swarm
             "from langgraph.runtime import Runtime",
             "",
             f"from {PACKAGE_NAME}.context import Context",
-            f"from {PACKAGE_NAME}.state import State",
         ]
     )
+    if is_database:
+        header.extend(_database_import_lines(node))
+    header.append(f"from {PACKAGE_NAME}.state import State")
     if is_orchestrator and node.agent is not None:
         for child in node.agent.delegates_to:
             header.append(f"from {PACKAGE_NAME}.nodes.{child} import {child}_body")
-    if is_orchestrator:
+    for database_node in database_tools:
+        header.append(
+            f"from {PACKAGE_NAME}.nodes.{database_node.id} import {database_node.id}_body"
+        )
+    if needs_tool_import:
         header.extend(["", "MAX_TOOL_ROUNDS = 6"])
+    if is_database:
+        # The declared operation and seed path, outside the body markers.
+        header.append("")
+        header.extend(_database_constant_lines(node))
     header.extend(
         [
             "",
@@ -581,6 +1123,12 @@ def render_node_module(graph: SwarmGraph, structure: GraphStructure, node: Swarm
             "    except ValueError:",
             '        return {"text": text}',
             '    return value if isinstance(value, dict) else {"value": value}',
+        ]
+    )
+    if is_agent and node.io.output_type == "list[json]":
+        header.extend(_parse_json_rows_helper_lines())
+    header.extend(
+        [
             "",
             "",
             f"async def {node.id}_body(",
@@ -597,8 +1145,10 @@ def render_node_module(graph: SwarmGraph, structure: GraphStructure, node: Swarm
     )
     if node.kind == "programmatic":
         body = [f"    {UNCONVERTED_BODY_SENTINEL}"]
+    elif is_database:
+        body = _database_node_body(node)
     elif is_agent:
-        body = _default_agent_body(graph, node)
+        body = _default_agent_body(graph, node, database_tools)
     elif node.kind == "join":
         body = [
             "    # Fan-in: the arms already reduced into this join's channel.",
@@ -659,14 +1209,29 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
     sample_input = PORT_TYPE_SAMPLE_INPUT[entry.io.input_type]
     origin = PORT_TYPE_RUNTIME_ORIGIN[exit_node.io.output_type]
     reply = json.dumps(fake_reply_for(graph))
-    return "\n".join(
+    # Gated on the document using a database node: a project without one gets
+    # exactly the file it got before the three kinds existed -- no extra import,
+    # no extra function, no extra check in main().
+    database_check = _database_mode_check_lines(graph)
+    lines = [
+        '"""Validation gate for the LangGraph export.',
+        "",
+        "Asserts, in order: the Mermaid rendering equals the golden captured at",
+        "scaffold time; the compiled graph's node set equals the canvas node set;",
+        "and ``ainvoke`` completes with a keyless fake model, producing the",
+        "declared output type.",
+    ]
+    if database_check:
+        lines.extend(
+            [
+                "A document that uses a database node asserts one more thing first:",
+                "``SWARM_DB_MODE`` selects the seeded in-memory mock, so this gate",
+                "needs no credentials and no driver -- the same assertion the",
+                "pydantic-graph target's own dry run makes.",
+            ]
+        )
+    lines.extend(
         [
-            '"""Validation gate for the LangGraph export.',
-            "",
-            "Asserts, in order: the Mermaid rendering equals the golden captured at",
-            "scaffold time; the compiled graph's node set equals the canvas node set;",
-            "and ``ainvoke`` completes with a keyless fake model, producing the",
-            "declared output type.",
             '"""',
             "",
             "from __future__ import annotations",
@@ -678,6 +1243,9 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
             "",
             f"from {PACKAGE_NAME}.context import Context",
             f"from {PACKAGE_NAME}.graph import graph",
+            *((
+                f"from {PACKAGE_NAME}.repositories import MOCK, db_mode",
+            ) if database_check else ()),
             f"from {PACKAGE_NAME}.state import initial_state",
             "",
             "",
@@ -692,6 +1260,7 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
             f"EXPECTED_NODES = {{'__start__', '__end__', {expected}}}",
             f"EXIT_NODE = {graph.exit_node_id!r}",
             f"FAKE_REPLY = {reply}",
+            *database_check,
             "",
             "",
             "def check_render() -> None:",
@@ -733,6 +1302,7 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
             "",
             "",
             "def main() -> None:",
+            *(("    check_db_mode()",) if database_check else ()),
             "    check_render()",
             "    check_nodes()",
             "    asyncio.run(check_run())",
@@ -744,6 +1314,39 @@ def _render_dry_run(graph: SwarmGraph, structure: GraphStructure) -> str:
             "",
         ]
     )
+    return "\n".join(lines)
+
+
+def _database_mode_check_lines(graph: SwarmGraph) -> list[str]:
+    """The gated mock-mode assertion ``validate/dry_run.py`` carries.
+
+    Empty for a document with no database node, which is what keeps that file
+    byte-identical to the pre-database one.
+
+    The same assertion, in the same words, that the pydantic-graph target's dry
+    run makes: ``SWARM_DB_MODE`` selects the repository implementation for every
+    database node in the project, and this gate has no credentials, no DSN and no
+    driver installed. A value that selects *live* -- or one the factory refuses
+    as unrecognized, which raises -- therefore has to fail here, before a step
+    reads anything, rather than reaching a real database or failing for a reason
+    that has nothing to do with the generated code.
+    """
+    if not used_db_kinds(graph):
+        return []
+    return [
+        "",
+        "",
+        "def check_db_mode() -> None:",
+        '    """The keyless gate runs the seeded in-memory mock, never a live',
+        "    engine: this script has no credentials and no driver installed, so",
+        "    a SWARM_DB_MODE that selects live (or any unrecognized value,",
+        '    which raises) has to fail here, before a step reads anything."""',
+        "    assert db_mode() == MOCK, (",
+        "        f'validate/dry_run.py expects the mock database ({MOCK}); '",
+        "        f'SWARM_DB_MODE selects {db_mode()!r}'",
+        "    )",
+        "    print(f'OK database mode is {MOCK}')",
+    ]
 
 
 def _capture_golden_mermaid(project_dir: Path) -> str:

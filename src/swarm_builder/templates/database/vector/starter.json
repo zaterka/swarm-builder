@@ -1,0 +1,48 @@
+{
+  "label": "Vector (product documentation)",
+  "description": "Search a document collection by similarity in mock mode (an in-memory index with a deterministic local embedder -- no model download, no network) or in a live Qdrant. Search returns whole documents with their score, never text fragments.",
+  "spec": {
+    "collection": "product_docs",
+    "top_k": 4,
+    "min_score": 0.0,
+    "seed": [
+      {
+        "id": "doc-1",
+        "text": "The Nimbus Router X1 is a compact mesh router with two gigabit ports and a single-pane setup wizard for home networks.",
+        "metadata": {
+          "product": "Nimbus Router X1",
+          "section": "overview"
+        }
+      },
+      {
+        "id": "doc-2",
+        "text": "To reset the Nimbus Router X1 to factory settings, hold the recessed button for ten seconds until the status light turns amber.",
+        "metadata": {
+          "product": "Nimbus Router X1",
+          "section": "troubleshooting"
+        }
+      },
+      {
+        "id": "doc-3",
+        "text": "The Aperture Sensor S2 reports temperature and humidity every five minutes over a low-power wireless link to the gateway.",
+        "metadata": {
+          "product": "Aperture Sensor S2",
+          "section": "overview"
+        }
+      },
+      {
+        "id": "doc-4",
+        "text": "Billing for the Aperture Sensor S2 is monthly per device; a gateway is included with the first two sensors on an annual plan.",
+        "metadata": {
+          "product": "Aperture Sensor S2",
+          "section": "billing"
+        }
+      }
+    ],
+    "note": "The product_docs example: four blurbs, searched by cosine similarity."
+  },
+  "io": {
+    "input_type": "str",
+    "output_type": "list[json]"
+  }
+}

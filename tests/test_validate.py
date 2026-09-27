@@ -27,12 +27,14 @@ from fixtures.stub_fill import apply_stub_fill
 from swarm_builder.compile import ResolvedModel, default_scaffold_model
 from swarm_builder.compile.scaffold import scaffold
 from swarm_builder.compile.validate import (
+    DATABASE_ENV_VARS_TO_STRIP,
     STEP_KEYLESS_IMPORT,
     STEP_UV_SYNC,
     TIMEOUT_RETURNCODE,
     ExtrasCheckResult,
     MissingExtraError,
     ValidationStepError,
+    _build_subprocess_env,
     _run_bounded,
     check_pyproject_extras,
     validate_project,
@@ -290,3 +292,46 @@ def test_full_gate_reports_the_failing_step_stderr_tail_and_keeps_the_project(
     assert project_dir.exists()
     assert graph_py.exists()
     assert "intentionally broken" in graph_py.read_text()
+
+
+# ---------------------------------------------------------------------------
+# The gate's subprocess environment (database nodes)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_strips_every_database_variable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gate is always keyless *and* mock, so it must not inherit a live config.
+
+    The emitted ``validate/dry_run.py`` asserts ``db_mode() == "mock"``. Without
+    this stripping, a user who exported ``SWARM_DB_MODE=live`` -- the documented
+    way to make the Run button read a real database -- would have the next
+    compile fail its own gate with "expects the mock database (mock)", and going
+    live would mean never being able to recompile.
+    """
+    for var in DATABASE_ENV_VARS_TO_STRIP:
+        monkeypatch.setenv(var, "live-or-a-dsn")
+    monkeypatch.setenv("UV_CACHE_DIR", "/somewhere-else")
+
+    env = _build_subprocess_env(Path("/tmp/uv-cache"))
+
+    for var in DATABASE_ENV_VARS_TO_STRIP:
+        assert var not in env, f"{var} leaked into the gate environment"
+    assert env["UV_CACHE_DIR"] == "/tmp/uv-cache"
+
+
+def test_gate_strip_list_covers_every_variable_the_catalog_declares() -> None:
+    """A drift guard, not a tautology.
+
+    ``DATABASE_ENV_VARS_TO_STRIP`` is written out by hand so it reads at a glance
+    (this project's convention for such tables). Adding an engine to the starter
+    catalog without adding its variables here would leak them into every gate
+    subprocess, so the two are asserted to agree.
+    """
+    from swarm_builder.templates.database import DATABASE_CATALOG
+
+    catalog_vars = {
+        variable for entry in DATABASE_CATALOG.values() for variable in entry.env_vars
+    }
+    missing = catalog_vars - set(DATABASE_ENV_VARS_TO_STRIP)
+    assert not missing, f"catalog variables missing from the gate strip list: {sorted(missing)}"
+    assert "SWARM_DB_MODE" in DATABASE_ENV_VARS_TO_STRIP

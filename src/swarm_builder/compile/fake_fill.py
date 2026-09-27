@@ -51,6 +51,12 @@ UNFILLED_BODY_SENTINEL = 'raise NotImplementedError("swarm_builder: unfilled ste
 #: ``graph.py`` via ``builder.decision(...)``/``builder.join(...)`` --
 #: so there is nothing to fill; verified by scaffolding the decision and
 #: fan-out fixtures and finding no step module for either kind.
+#:
+#: The three **database** kinds are complete in the same sense as ``agent``:
+#: their bodies are emitted from the node's declared operation, and no model
+#: call ever authors a query, a seed or a repository file. Adding them here
+#: would let the fill stage overwrite a working statement with a stub that
+#: answers from ``ctx.inputs``, which is exactly why this tuple is pinned.
 FILLABLE_NODE_KINDS = frozenset({"programmatic"})
 
 #: PortType -> an expression that is valid for that annotation and is
@@ -62,6 +68,9 @@ _RETURN_EXPRESSIONS: dict[PortType, str] = {
     "str": 'f"{ctx.inputs}"',
     "list[str]": "[str(ctx.inputs)]",
     "json": '{"input": str(ctx.inputs)}',
+    # One row object in a list: `list[json]` is a list of row mappings, and the
+    # coercion a downstream `list[json]` step applies accepts exactly that shape.
+    "list[json]": '[{"input": str(ctx.inputs)}]',
 }
 
 #: Indentation of a step-function body: one level inside ``async def``.

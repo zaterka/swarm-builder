@@ -79,6 +79,7 @@ from swarm_builder.inherit.routes import (
 )
 from swarm_builder.inherit.settings import EffectiveModel, RouteConfig, resolve_effective_model
 from swarm_builder.models import SwarmGraph
+from swarm_builder.store.projects import write_project_marker
 
 # ---------------------------------------------------------------------------
 # Event vocabulary
@@ -695,6 +696,12 @@ def _run_scaffold_phase(
     if project_dir.exists():
         _emit_log(job, f"recompile: clearing existing project at {project_dir}")
         _clear_project_dir(project_dir)
+
+    # The clear above wiped the ownership marker; re-assert it before the
+    # baseline so the directory stays attributable across a recompile. The
+    # marker is excluded from the boundary contract (boundary.py), and the fill
+    # agent has no tool that can create or modify it.
+    write_project_marker(project_dir, graph.id, graph.name)
 
     result = scaffold(graph, project_dir, resolved_model)
     baseline = capture_baseline(project_dir)

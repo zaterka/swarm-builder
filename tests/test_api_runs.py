@@ -126,6 +126,20 @@ def test_coerce_list_str_requires_strings() -> None:
         coerce_input([1, 2], "list[str]")
 
 
+def test_coerce_list_json_passes_a_list_of_objects_through_unchanged() -> None:
+    """The port type a database read produces, and therefore one a graph may declare
+    as its entry port: rows arrive as rows, from an already-parsed array or from the
+    panel's JSON text, and a scalar inside the list is refused rather than coerced."""
+    rows = [{"id": 1, "name": "Acme"}, {"id": 2, "name": "Globex"}]
+    assert coerce_input(rows, "list[json]") == rows
+    assert coerce_input('[{"id": 1}]', "list[json]") == [{"id": 1}]
+    assert coerce_input([], "list[json]") == []
+    with pytest.raises(RunInputError, match="list of objects"):
+        coerce_input(["a"], "list[json]")
+    with pytest.raises(RunInputError, match="not valid JSON"):
+        coerce_input("[{nope", "list[json]")
+
+
 # ---------------------------------------------------------------------------
 # project_is_stale
 # ---------------------------------------------------------------------------

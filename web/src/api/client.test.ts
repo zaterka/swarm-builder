@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { api, subscribeCompileEvents } from './client';
+import { api, StartersUnavailableError, subscribeCompileEvents } from './client';
 import type { CompileSseEvent } from './compileWire';
 
 // SSE frame-parsing tests against sse-starlette 3.4.11's REAL wire
@@ -246,5 +246,54 @@ describe('clarifyGraph', () => {
     // The analysis pass uses the same resolved route as the draft, so there is
     // deliberately no per-request override to send.
     expect(body).not.toHaveProperty('modelOverride');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The database starter catalog
+//
+// `GET /api/database-starters` degrades to the same 503 the agent template
+// catalog does, and the client turns it into its own named error so the
+// palette has one thing to catch: while the catalog is unavailable there is no
+// starter to create a database node from, so those entries stay disabled.
+// ---------------------------------------------------------------------------
+
+describe('listDatabaseStarters', () => {
+  it('reads the catalog from the documented path', async () => {
+    const fetchMock = vi.fn(async () => jsonOk([]));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.listDatabaseStarters();
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/database-starters');
+    expect(init?.method ?? 'GET').toBe('GET');
+  });
+
+  it('translates a 503 into StartersUnavailableError, keeping the server detail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            detail: 'database starters are not available: could not be read (No such file)',
+          }),
+          { status: 503, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+
+    await expect(api.listDatabaseStarters()).rejects.toBeInstanceOf(StartersUnavailableError);
+    await expect(api.listDatabaseStarters()).rejects.toMatchObject({
+      status: 503,
+      detail: expect.stringContaining('not available'),
+    });
+  });
+
+  it('leaves any other failure as the plain ApiError', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 500 })));
+
+    await expect(api.listDatabaseStarters()).rejects.toMatchObject({ name: 'ApiError', status: 500 });
+    await expect(api.listDatabaseStarters()).rejects.not.toBeInstanceOf(StartersUnavailableError);
   });
 });
