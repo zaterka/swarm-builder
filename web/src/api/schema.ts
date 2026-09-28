@@ -111,6 +111,21 @@ export type ClarifyOptionOut = components['schemas']['ClarifyOptionOut'];
 export type ClarifyAnswer = components['schemas']['ClarifyAnswerInRaw'];
 export type AttachmentSummaryOut = components['schemas']['AttachmentSummaryOut'];
 
+/** One `progress` frame of `POST /api/graphs/generate/stream`, mirroring
+ * `GenerateProgressOut`. Hand-written: SSE frames are not a response schema, so
+ * the generator never sees it. `rejected` means that attempt's draft failed
+ * review and `problems` went back to the model. */
+export interface GenerateProgressEvent {
+  stage: 'drafting' | 'reviewing' | 'rejected';
+  attempt: number;
+  maxAttempts: number;
+  problems: string[];
+}
+
+/** What the panel is told while a streamed generation runs: each progress frame,
+ * then `saving` once a draft passed review. */
+export type GenerateStreamUpdate = GenerateProgressEvent | { stage: 'saving' };
+
 // Supplementary files (`routes/attachments.py`). The server owns the caps and
 // the supported formats; the panel renders what it is told rather than restating
 // those rules, so the two cannot drift.

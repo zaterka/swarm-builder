@@ -593,7 +593,7 @@ you.
 
 ## Export to LangGraph
 
-The compile panel has a **Target** picker. *PydanticAI + LangGraph export*
+The compile panel has a **Target** picker. *LangGraph*
 runs the usual five phases, then four more that turn the **validated**
 PydanticAI project into a LangGraph project under
 `workspace/projects-langgraph/<graphId>/`:

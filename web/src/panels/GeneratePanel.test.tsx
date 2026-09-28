@@ -19,6 +19,14 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
+/** A `/generate/stream` reply in sse-starlette's framing. */
+function sseResponse(frames: [event: string, data: unknown][]): Response {
+  const text = frames
+    .map(([event, data]) => `event: ${event}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`)
+    .join('');
+  return new Response(text, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+}
+
 const HEALTH = {
   version: '0.1.0',
   dshHome: '/tmp/dsh',
@@ -91,6 +99,8 @@ const GRAPH = {
   updatedAt: '2026-01-01T00:00:00Z',
 };
 
+const GENERATED = { graph: GRAPH, warnings: [], attempts: 1, dryRun: false, attachments: [] };
+
 interface Options {
   clarify?: unknown | (() => Response);
   generate?: unknown | (() => Response);
@@ -110,8 +120,9 @@ function stubFetch(options: Options = {}) {
       };
       if (url.endsWith('/api/health')) return jsonResponse(HEALTH);
       if (url.endsWith('/api/graphs/generate/clarify')) return pick(options.clarify, CLEAR);
-      if (url.endsWith('/api/graphs/generate')) {
-        return pick(options.generate, { graph: GRAPH, warnings: [], attempts: 1, dryRun: false, attachments: [] });
+      if (url.endsWith('/api/graphs/generate/stream')) {
+        if (typeof options.generate === 'function') return (options.generate as () => Response)();
+        return sseResponse([['done', options.generate ?? GENERATED]]);
       }
       if (url.endsWith('/api/graphs/attachments')) return pick(options.upload, { attachment: ATTACHMENT, warnings: [] });
       if (url.includes('/api/graphs/attachments/')) return jsonResponse({ attachmentId: 'x', deleted: true });
@@ -296,7 +307,7 @@ describe('GeneratePanel clarifying questions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Generate with answers' }));
 
     await waitFor(() => expect(onGenerated).toHaveBeenCalled());
-    const generate = calls.find((call) => call.url.endsWith('/api/graphs/generate'));
+    const generate = calls.find((call) => call.url.endsWith('/api/graphs/generate/stream'));
     const body = JSON.parse(String(generate?.init.body)) as Record<string, unknown>;
     expect(body.answers).toEqual([
       { questionId: 'q1', question: 'Who approves a refund?', answer: 'A human reviewer' },
@@ -317,8 +328,8 @@ describe('GeneratePanel clarifying questions', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Generate with answers' }));
 
-    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/api/graphs/generate'))).toBe(true));
-    const generate = calls.find((call) => call.url.endsWith('/api/graphs/generate'));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/api/graphs/generate/stream'))).toBe(true));
+    const generate = calls.find((call) => call.url.endsWith('/api/graphs/generate/stream'));
     const body = JSON.parse(String(generate?.init.body)) as { answers: { answer: string }[] };
     expect(body.answers[0]?.answer).toBe('The finance lead');
   });
@@ -331,8 +342,7 @@ describe('GeneratePanel clarifying questions', () => {
     const gate: { release?: () => void } = {};
     const generate = () =>
       new Promise<Response>((resolve) => {
-        gate.release = () =>
-          resolve(jsonResponse({ graph: GRAPH, warnings: [], attempts: 1, dryRun: false, attachments: [] }));
+        gate.release = () => resolve(sseResponse([['done', GENERATED]]));
       });
     vi.stubGlobal(
       'fetch',
@@ -340,7 +350,7 @@ describe('GeneratePanel clarifying questions', () => {
         const url = String(input);
         if (url.endsWith('/api/health')) return jsonResponse(HEALTH);
         if (url.endsWith('/api/graphs/generate/clarify')) return jsonResponse(NEEDS_CLARIFICATION);
-        if (url.endsWith('/api/graphs/generate')) return generate();
+        if (url.endsWith('/api/graphs/generate/stream')) return generate();
         return jsonResponse({});
       }),
     );
@@ -357,6 +367,63 @@ describe('GeneratePanel clarifying questions', () => {
     gate.release?.();
   });
 
+  it('shows which step the draft is on, including a reviewer rejection', async () => {
+    const encoder = new TextEncoder();
+    const stream: { push?: (event: string, data: unknown) => void; end?: () => void } = {};
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        stream.push = (event, data) =>
+          controller.enqueue(encoder.encode(`event: ${event}\r\ndata: ${JSON.stringify(data)}\r\n\r\n`));
+        stream.end = () => controller.close();
+      },
+    });
+    stubFetch({
+      generate: () => new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    });
+    const onGenerated = vi.fn();
+    render(<GeneratePanel onGenerated={onGenerated} />);
+    fireEvent.change(screen.getByLabelText('Workflow description'), { target: { value: 'Handle refunds.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate graph' }));
+
+    expect(await screen.findByText(/The model is drafting nodes and edges/)).toBeInTheDocument();
+    stream.push?.('progress', { stage: 'drafting', attempt: 1, maxAttempts: 3, problems: [] });
+    stream.push?.('progress', { stage: 'reviewing', attempt: 1, maxAttempts: 3, problems: [] });
+    expect(await screen.findByText(/Checking draft 1 against the reviewer's rules/)).toBeInTheDocument();
+    stream.push?.('progress', { stage: 'rejected', attempt: 1, maxAttempts: 3, problems: ['a', 'b'] });
+    stream.push?.('progress', { stage: 'drafting', attempt: 2, maxAttempts: 3, problems: [] });
+    expect(
+      await screen.findByText(/found 2 problems in draft 1; the model is redrafting \(attempt 2 of 3\)/),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Draft 2 of 3')).toBeInTheDocument();
+
+    stream.push?.('done', GENERATED);
+    stream.end?.();
+    await waitFor(() => expect(onGenerated).toHaveBeenCalled());
+    expect(screen.queryByText(/redrafting/)).not.toBeInTheDocument();
+  });
+
+  it('reports a failure that arrives inside the stream', async () => {
+    stubFetch({
+      generate: () =>
+        sseResponse([
+          ['progress', { stage: 'drafting', attempt: 1, maxAttempts: 3, problems: [] }],
+          [
+            'error',
+            {
+              status: 422,
+              detail: { code: 'generation_failed', message: 'could not produce a review-clean graph', problems: ['dangling edge'] },
+            },
+          ],
+        ]),
+    });
+    render(<GeneratePanel onGenerated={() => undefined} />);
+    fireEvent.change(screen.getByLabelText('Workflow description'), { target: { value: 'Handle refunds.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate graph' }));
+
+    expect(await screen.findByText('could not produce a review-clean graph')).toBeInTheDocument();
+    expect(screen.getByText('dangling edge')).toBeInTheDocument();
+  });
+
   it('generates anyway with no answers when the user skips the questions', async () => {
     const calls = stubFetch({ clarify: NEEDS_CLARIFICATION });
     render(<GeneratePanel onGenerated={() => undefined} />);
@@ -366,8 +433,8 @@ describe('GeneratePanel clarifying questions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Generate anyway' }));
 
-    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/api/graphs/generate'))).toBe(true));
-    const generate = calls.find((call) => call.url.endsWith('/api/graphs/generate'));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/api/graphs/generate/stream'))).toBe(true));
+    const generate = calls.find((call) => call.url.endsWith('/api/graphs/generate/stream'));
     expect(JSON.parse(String(generate?.init.body)).answers).toEqual([]);
   });
 
@@ -413,7 +480,7 @@ describe('GeneratePanel clarifying questions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Generate graph' }));
 
     await waitFor(() => expect(onGenerated).toHaveBeenCalled());
-    expect(calls.some((call) => call.url.endsWith('/api/graphs/generate'))).toBe(true);
+    expect(calls.some((call) => call.url.endsWith('/api/graphs/generate/stream'))).toBe(true);
     expect(screen.getByText(/Could not ask clarifying questions: model API error/)).toBeInTheDocument();
   });
 

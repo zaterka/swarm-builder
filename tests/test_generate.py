@@ -8,6 +8,8 @@ first draft is broken, and the HTTP route under ``SWARM_FAKE_GENERATE=1``.
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +25,7 @@ from swarm_builder.compile.generate import (
     DraftNode,
     DraftStateField,
     GenerateError,
+    GenerateProgress,
     GraphDraft,
     fake_draft,
     generate_graph,
@@ -498,6 +501,28 @@ async def test_repair_loop_gives_up_after_max_repairs(monkeypatch: pytest.Monkey
     assert any("unknown node title" in p for p in excinfo.value.problems)
 
 
+async def test_repair_loop_reports_each_draft_review_and_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bad = GraphDraft(
+        name="x",
+        nodes=[DraftNode(title="A", kind="agent", intent="a")],
+        edges=[DraftEdge(source="A", target="Missing")],
+    )
+    agent = _ScriptedAgent([bad, _linear_draft()])
+    monkeypatch.setattr(generate_module, "build_generate_agent", lambda model, **_: agent)
+    events: list[GenerateProgress] = []
+    await generate_graph("desc", model="test:model", graph_id="g", on_progress=events.append)
+    assert [(e.stage, e.attempt, e.max_attempts) for e in events] == [
+        ("drafting", 1, 3),
+        ("reviewing", 1, 3),
+        ("rejected", 1, 3),
+        ("drafting", 2, 3),
+        ("reviewing", 2, 3),
+    ]
+    assert any("unknown node title" in p for p in events[2].problems)
+
+
 async def test_generate_without_model_and_without_fake_is_refused() -> None:
     with pytest.raises(ValueError, match="needs a model"):
         await generate_graph("desc", model=None, graph_id="g")
@@ -607,6 +632,84 @@ def test_generate_route_validates_the_description(workspace: Path) -> None:
     _ = workspace
     client = TestClient(create_app())
     assert client.post("/api/graphs/generate", json={"description": ""}).status_code == 422
+
+
+def _sse_frames(text: str) -> list[tuple[str, object]]:
+    frames: list[tuple[str, object]] = []
+    for raw in re.split(r"\r\n\r\n|\n\n", text):
+        event, data = "message", None
+        for line in raw.splitlines():
+            if line.startswith("event:"):
+                event = line.removeprefix("event:").strip()
+            elif line.startswith("data:"):
+                data = json.loads(line.removeprefix("data:").strip())
+        if data is not None:
+            frames.append((event, data))
+    return frames
+
+
+def test_generate_stream_reports_progress_then_the_saved_graph(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ = workspace
+    monkeypatch.setenv("SWARM_FAKE_GENERATE", "1")
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/graphs/generate/stream",
+        json={"description": "Read the ticket. Classify it. Reply.", "name": "Triage"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames = _sse_frames(response.text)
+    assert [event for event, _ in frames] == ["progress", "progress", "saving", "done"]
+    assert frames[0][1] == {
+        "stage": "drafting",
+        "attempt": 1,
+        "maxAttempts": 3,
+        "problems": [],
+    }
+    assert frames[1][1]["stage"] == "reviewing"  # type: ignore[index]
+    done = frames[-1][1]
+    assert isinstance(done, dict)
+    assert done["graph"]["name"] == "Triage"
+    assert done["dryRun"] is True
+    assert client.get(f"/api/graphs/{done['graph']['id']}").status_code == 200
+
+
+def test_generate_stream_refuses_up_front_when_no_model_is_configured(workspace: Path) -> None:
+    _ = workspace
+    response = TestClient(create_app()).post(
+        "/api/graphs/generate/stream", json={"description": "Anything."}
+    )
+    assert response.status_code == 503
+    assert "No model is configured yet" in response.json()["detail"]
+
+
+def test_generate_stream_reports_a_failed_generation_in_band(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ = workspace
+    monkeypatch.setenv("SWARM_FAKE_GENERATE", "1")
+
+    async def failing(*_: object, on_progress: object = None, **__: object) -> None:
+        assert callable(on_progress)
+        on_progress(GenerateProgress("drafting", 1, 3))
+        on_progress(GenerateProgress("rejected", 1, 3, ("dangling edge",)))
+        raise GenerateError(["dangling edge"], 3)
+
+    monkeypatch.setattr(generate_module, "generate_graph", failing)
+    response = TestClient(create_app()).post(
+        "/api/graphs/generate/stream", json={"description": "Anything."}
+    )
+    assert response.status_code == 200
+    frames = _sse_frames(response.text)
+    assert [event for event, _ in frames] == ["progress", "progress", "error"]
+    assert frames[1][1]["problems"] == ["dangling edge"]  # type: ignore[index]
+    error = frames[-1][1]
+    assert isinstance(error, dict)
+    assert error["status"] == 422
+    assert error["detail"]["code"] == "generation_failed"
+    assert error["detail"]["problems"] == ["dangling edge"]
 
 
 # ---------------------------------------------------------------------------

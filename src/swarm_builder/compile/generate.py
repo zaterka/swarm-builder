@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict, deque
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -221,6 +221,27 @@ class GenerateResult:
     graph: SwarmGraph
     warnings: list[Finding]
     attempts: int
+
+
+GenerateStage = Literal["drafting", "reviewing", "rejected"]
+
+
+@dataclass(frozen=True)
+class GenerateProgress:
+    """One step of :func:`generate_graph`, reported as it starts.
+
+    ``rejected`` means the draft of ``attempt`` failed materialization or review;
+    ``problems`` is what goes back to the model, and a ``drafting`` event for the
+    next attempt follows unless the budget is spent.
+    """
+
+    stage: GenerateStage
+    attempt: int
+    max_attempts: int
+    problems: tuple[str, ...] = ()
+
+
+ProgressCallback = Callable[[GenerateProgress], None]
 
 
 # ---------------------------------------------------------------------------
@@ -895,6 +916,7 @@ async def generate_graph(
     answers: Sequence[ClarifyAnswerIn] = (),
     max_repairs: int = MAX_REPAIRS,
     max_output_tokens: int | None = None,
+    on_progress: ProgressCallback | None = None,
 ) -> GenerateResult:
     """Describe -> draft -> materialize -> review, repairing up to ``max_repairs`` times.
 
@@ -911,6 +933,8 @@ async def generate_graph(
         max_repairs: Feedback rounds after the first draft.
         max_output_tokens: An explicit output budget for each model call, or
             ``None`` for the provider's default.
+        on_progress: Called synchronously at the start of each draft and
+            review, and after each rejected draft.
 
     Returns:
         The review-clean graph, its warnings, and how many drafts it took.
@@ -920,11 +944,21 @@ async def generate_graph(
             request budget ran out. Carries the last round's problems.
         ValueError: If ``model`` is ``None`` and the fake path is off.
     """
+    max_attempts = max_repairs + 1
+
+    def report(stage: GenerateStage, attempt: int, problems: Sequence[str] = ()) -> None:
+        if on_progress is not None:
+            on_progress(GenerateProgress(stage, attempt, max_attempts, tuple(problems)))
+
     if fake_generate_enabled():
+        report("drafting", 1)
         graph = materialize(fake_draft(description), graph_id)
+        report("reviewing", 1)
         result = review(graph)
         if not result.ok:
-            raise GenerateError(_review_problems(result.errors), 1)
+            problems = _review_problems(result.errors)
+            report("rejected", 1, problems)
+            raise GenerateError(problems, 1)
         return GenerateResult(graph=graph, warnings=result.warnings, attempts=1)
 
     if model is None:
@@ -942,10 +976,12 @@ async def generate_graph(
     attempts = 0
     while attempts <= max_repairs:
         attempts += 1
+        report("drafting", attempts)
         try:
             run = await agent.run(prompt, message_history=history, usage_limits=limits)
         except UsageLimitExceeded as exc:
             raise GenerateError([*problems, f"request budget exhausted: {exc}"], attempts) from exc
+        report("reviewing", attempts)
         try:
             graph = materialize(run.output, graph_id)
         except DraftError as exc:
@@ -955,6 +991,7 @@ async def generate_graph(
             if result.ok:
                 return GenerateResult(graph=graph, warnings=result.warnings, attempts=attempts)
             problems = _review_problems(result.errors)
+        report("rejected", attempts, problems)
         history = run.all_messages()
         prompt = _REPAIR_PROMPT.format(problems=_format_problems(problems))
     raise GenerateError(problems, attempts)
@@ -972,7 +1009,10 @@ __all__ = [
     "DraftNode",
     "DraftStateField",
     "GenerateError",
+    "GenerateProgress",
     "GenerateResult",
+    "GenerateStage",
+    "ProgressCallback",
     "GraphDraft",
     "build_generate_agent",
     "build_prompt_parts",

@@ -543,6 +543,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/graphs/generate/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Generate Graph Stream Route
+         * @description ``/graphs/generate``, reporting each draft and review as it happens.
+         *
+         *     Everything that can be refused up front (the model route, the attachments)
+         *     still fails with a plain HTTP status; only failures once drafting has begun
+         *     arrive in-band, because by then the 200 is committed.
+         *
+         *     Raises:
+         *         HTTPException: The same pre-flight statuses as ``/graphs/generate``.
+         */
+        post: operations["generate_graph_stream_route_api_graphs_generate_stream_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/graphs/attachments": {
         parameters: {
             query?: never;
@@ -2628,6 +2655,52 @@ export interface operations {
             };
             /** @description the model API refused or failed the request */
             502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description no usable route or credential, or the generator is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    generate_graph_stream_route_api_graphs_generate_stream_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GenerateGraphRequest"];
+            };
+        };
+        responses: {
+            /** @description SSE: `progress` events (stage, attempt, maxAttempts, problems), then `saving`, then one terminal `done` (a GenerateGraphResponse) or `error` (`{status, detail}`, the status and detail /generate would have returned) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                    "text/event-stream": unknown;
+                };
+            };
+            /** @description the attachments exceed the per-request size cap */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description the description or an attachment is unusable */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

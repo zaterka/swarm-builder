@@ -22,8 +22,8 @@ const SESSION_KEY_PREFIX = 'swarm-builder:compile:';
 /** The two compile targets `POST /api/compile` accepts (`StartCompileRequest.target`). */
 type CompileTarget = NonNullable<StartCompileRequest['target']>;
 const TARGET_LABELS: Record<CompileTarget, string> = {
-  'pydantic-graph': 'PydanticAI (pydantic-graph)',
-  langgraph: 'PydanticAI + LangGraph export',
+  'pydantic-graph': 'PydanticAI',
+  langgraph: 'LangGraph',
 };
 
 /** A graph has at most one live compile (409 otherwise), so one sessionStorage

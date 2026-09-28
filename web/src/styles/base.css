@@ -305,7 +305,8 @@ select {
 
 /* Left as a native control and merely tinted: a hand-rolled checkbox
    buys nothing here and loses platform behaviour. */
-input[type='checkbox'] {
+input[type='checkbox'],
+input[type='radio'] {
   appearance: auto;
   accent-color: var(--sb-accent);
   width: 14px;
@@ -319,7 +320,7 @@ input[type='checkbox'] {
 }
 
 /* A label that wraps a caption plus its control becomes the caption; a
-   label that wraps a checkbox stays a single inline row. Several
+   label that wraps a checkbox or radio stays a single inline row. Several
    checkbox labels in the Inspector carry an inline `display: block`,
    which neutralises the flex column on its own — the :has() rule below
    covers the rest. */
@@ -333,7 +334,8 @@ label {
   color: var(--sb-text-muted);
 }
 
-label:has(> input[type='checkbox']) {
+label:has(> input[type='checkbox']),
+label:has(> input[type='radio']) {
   flex-direction: row;
   align-items: center;
   gap: 0;

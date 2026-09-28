@@ -15,6 +15,8 @@ import type {
   ExportResponse,
   GenerateGraphRequest,
   GenerateGraphResponse,
+  GenerateProgressEvent,
+  GenerateStreamUpdate,
   GraphListResponse,
   HealthResponse,
   ModelsResponse,
@@ -656,6 +658,71 @@ function subscribeJobEventsAt(
   };
 }
 
+/**
+ * `POST /api/graphs/generate/stream`: the same generation as `generateGraph`,
+ * reporting each draft, review and rejection through `onUpdate`.
+ *
+ * Resolves with the `done` frame's response. Both a pre-flight refusal (a
+ * non-2xx status) and an in-band `error` frame become an `ApiError` with the
+ * status and detail the blocking route would have returned, so a caller handles
+ * failures exactly as it does for `generateGraph`. No reconnect: a lost stream
+ * cannot be resumed, only retried.
+ */
+async function generateGraphStream(
+  body: GenerateGraphRequest,
+  opts: { onUpdate: (update: GenerateStreamUpdate) => void; signal?: AbortSignal },
+): Promise<GenerateGraphResponse> {
+  const response = await fetch(`${API_BASE}/graphs/generate/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    body: JSON.stringify(body),
+    signal: opts.signal,
+  });
+  const contentType = response.headers.get('content-type') ?? '';
+  if (!response.ok || !contentType.startsWith('text/event-stream')) {
+    throw new ApiError(response.status, await parseErrorDetail(response));
+  }
+  if (!response.body) {
+    throw new Error('generate stream response had no readable body');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let match = buffer.match(FRAME_SEPARATOR_RE);
+      while (match) {
+        const parsed = parseFrame(buffer.slice(0, match.index));
+        buffer = buffer.slice((match.index ?? 0) + match[0].length);
+        match = buffer.match(FRAME_SEPARATOR_RE);
+        if (!parsed?.data) continue;
+        const data: unknown = JSON.parse(parsed.data);
+        switch (parsed.event) {
+          case 'progress':
+            opts.onUpdate(data as GenerateProgressEvent);
+            break;
+          case 'saving':
+            opts.onUpdate({ stage: 'saving' });
+            break;
+          case 'done':
+            return data as GenerateGraphResponse;
+          case 'error': {
+            const { status, detail } = data as { status: number; detail: unknown };
+            throw new ApiError(status, detail);
+          }
+        }
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+  throw new Error('the generate stream ended before the graph was ready');
+}
+
 // ---------------------------------------------------------------------------
 // Public surface
 // ---------------------------------------------------------------------------
@@ -679,6 +746,7 @@ export const api = {
   cancelCompile,
   subscribeCompileEvents,
   generateGraph,
+  generateGraphStream,
   clarifyGraph,
   uploadAttachment,
   deleteAttachment,

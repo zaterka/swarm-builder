@@ -1,9 +1,10 @@
-"""``POST /api/graphs/generate`` and ``POST /api/graphs/generate/clarify``.
+"""``POST /api/graphs/generate``, its ``/stream`` twin, and ``POST /api/graphs/generate/clarify``.
 
-Two endpoints, one flow. A client that wants a graph asks ``/clarify`` first:
-either the request is already concrete and it gets the assumptions the draft will
-make, or it gets up to four questions with options. The answers then ride along
-with the description (and any attachments) into ``/generate``.
+One flow. A client that wants a graph asks ``/clarify`` first: either the request
+is already concrete and it gets the assumptions the draft will make, or it gets up
+to four questions with options. The answers then ride along with the description
+(and any attachments) into ``/generate`` -- or ``/generate/stream``, which runs the
+same generation and reports each draft, review and rejection as an SSE event.
 
 Both endpoints resolve the model route the same way -- request override, then
 ``settings.yaml``, then ``SWARM_MODEL`` -- and both are subject to the same
@@ -23,12 +24,18 @@ keeps its provider default untouched.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
+from types import ModuleType
+from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UserError
+from sse_starlette import EventSourceResponse, JSONServerSentEvent, ServerSentEvent
 
 from swarm_builder import runtime
 from swarm_builder.attachments.limits import MAX_ANSWER_CHARS, MAX_ANSWERS
@@ -49,11 +56,19 @@ from swarm_builder.inherit.settings import EffectiveModel, resolve_effective_mod
 from swarm_builder.known_models import resolve_max_output_tokens
 from swarm_builder.models import ModelSelection, SwarmGraph
 from swarm_builder.routes.attachments import CODE_IMAGE_UNSUPPORTED
+from swarm_builder.routes.compile import SSE_MEDIA_TYPE, SSE_PING_INTERVAL_SECONDS
 from swarm_builder.routes.graphs import FindingOut
 from swarm_builder.routes.health import credential_blocker
 from swarm_builder.routes.problems import problem
 from swarm_builder.store.graphs import GraphStoreError, put_graph
 from swarm_builder.vision import supports_image_input
+
+if TYPE_CHECKING:
+    from swarm_builder.compile.generate import (
+        GenerateProgress,
+        GenerateResult,
+        ProgressCallback,
+    )
 
 router = APIRouter(tags=["generate"])
 
@@ -164,6 +179,15 @@ class GenerateGraphResponse(_CamelModel):
     dry_run: bool
     #: What the draft was given, echoed so the panel can report it.
     attachments: list[AttachmentSummaryOut] = Field(default_factory=list)
+
+
+class GenerateProgressOut(_CamelModel):
+    """One ``progress`` frame of ``/graphs/generate/stream``."""
+
+    stage: Literal["drafting", "reviewing", "rejected"]
+    attempt: int
+    max_attempts: int
+    problems: list[str] = Field(default_factory=list)
 
 
 def _normalize_answers(raw: list[ClarifyAnswerInRaw]) -> list[ClarifyAnswerIn]:
@@ -411,6 +435,124 @@ async def generate_graph_route(body: GenerateGraphRequest) -> GenerateGraphRespo
             route is unmappable, no model is configured, or the generator
             cannot be imported; 500 when the graph cannot be saved.
     """
+    prepared = _prepare_generate(body)
+    try:
+        result = await prepared.run(None)
+    except Exception as exc:
+        failure = _generate_failure(prepared.module, exc)
+        if failure is None:
+            raise
+        raise failure from exc
+    return _finish_generate(body, prepared, result)
+
+
+@router.post(
+    "/graphs/generate/stream",
+    responses={
+        200: {
+            "description": (
+                "SSE: `progress` events (stage, attempt, maxAttempts, problems), then "
+                "`saving`, then one terminal `done` (a GenerateGraphResponse) or `error` "
+                "(`{status, detail}`, the status and detail /generate would have returned)"
+            ),
+            "content": {SSE_MEDIA_TYPE: {}},
+        },
+        413: {"description": "the attachments exceed the per-request size cap"},
+        422: {"description": "the description or an attachment is unusable"},
+        503: {"description": "no usable route or credential, or the generator is unavailable"},
+    },
+)
+async def generate_graph_stream_route(body: GenerateGraphRequest) -> EventSourceResponse:
+    """``/graphs/generate``, reporting each draft and review as it happens.
+
+    Everything that can be refused up front (the model route, the attachments)
+    still fails with a plain HTTP status; only failures once drafting has begun
+    arrive in-band, because by then the 200 is committed.
+
+    Raises:
+        HTTPException: The same pre-flight statuses as ``/graphs/generate``.
+    """
+    prepared = _prepare_generate(body)
+    return EventSourceResponse(
+        _generate_events(body, prepared),
+        ping=SSE_PING_INTERVAL_SECONDS,
+        media_type=SSE_MEDIA_TYPE,
+    )
+
+
+async def _generate_events(
+    body: GenerateGraphRequest, prepared: _PreparedGenerate
+) -> AsyncIterator[ServerSentEvent]:
+    """Run the generation in a task and relay its progress as SSE frames."""
+    queue: asyncio.Queue[GenerateProgressOut | None] = asyncio.Queue()
+
+    def relay(progress: GenerateProgress) -> None:
+        queue.put_nowait(
+            GenerateProgressOut(
+                stage=progress.stage,
+                attempt=progress.attempt,
+                max_attempts=progress.max_attempts,
+                problems=list(progress.problems),
+            )
+        )
+
+    async def run() -> GenerateResult:
+        try:
+            return await prepared.run(relay)
+        finally:
+            queue.put_nowait(None)
+
+    task = asyncio.create_task(run())
+    try:
+        while (item := await queue.get()) is not None:
+            yield JSONServerSentEvent(event="progress", data=item.model_dump(by_alias=True))
+        try:
+            result = task.result()
+        except Exception as exc:
+            failure = _generate_failure(prepared.module, exc)
+            if failure is None:
+                yield _error_frame(HTTPException(status_code=500, detail="generation crashed"))
+                raise
+            yield _error_frame(failure)
+            return
+        yield JSONServerSentEvent(event="saving", data={})
+        try:
+            response = _finish_generate(body, prepared, result)
+        except HTTPException as exc:
+            yield _error_frame(exc)
+            return
+        yield JSONServerSentEvent(
+            event="done", data=response.model_dump(mode="json", by_alias=True)
+        )
+    finally:
+        if not task.done():
+            task.cancel()
+
+
+def _error_frame(exc: HTTPException) -> ServerSentEvent:
+    return JSONServerSentEvent(
+        event="error", data={"status": exc.status_code, "detail": exc.detail}
+    )
+
+
+@dataclass(frozen=True)
+class _PreparedGenerate:
+    """A request that passed every pre-flight check, ready to draft."""
+
+    module: ModuleType
+    effective: EffectiveModel
+    dry_run: bool
+    attachments: list[LoadedAttachment]
+    run: Callable[[ProgressCallback | None], Awaitable[GenerateResult]]
+
+
+def _prepare_generate(body: GenerateGraphRequest) -> _PreparedGenerate:
+    """Resolve the model and attachments, failing with the status /generate uses.
+
+    Raises:
+        HTTPException: 503 when the generator cannot be imported or no model is
+            usable; 413/422 for the attachments.
+    """
     try:
         # Lazy degradation seam -- see the module docstring.
         from swarm_builder.compile import generate as generate_module
@@ -441,13 +583,15 @@ async def generate_graph_route(body: GenerateGraphRequest) -> GenerateGraphRespo
         _refuse_unreadable_images(attachments, effective)
 
     graph_id = body.graph_id or str(uuid4())
-    try:
-        result = await generate_module.generate_graph(
+    answers = _normalize_answers(body.answers)
+
+    def run(on_progress: ProgressCallback | None) -> Awaitable[GenerateResult]:
+        return generate_module.generate_graph(
             body.description,
             model=model,
             graph_id=graph_id,
             attachments=attachments,
-            answers=_normalize_answers(body.answers),
+            answers=answers,
             # A thinking model can spend a small provider default on thinking and
             # return no text at all; the rule (and the measurement behind it) is
             # in known_models.default_max_output_tokens, with the user's own
@@ -455,28 +599,52 @@ async def generate_graph_route(body: GenerateGraphRequest) -> GenerateGraphRespo
             max_output_tokens=resolve_max_output_tokens(
                 effective.model, effective.max_tokens
             ),
+            on_progress=on_progress,
         )
-    except generate_module.GenerateError as exc:
-        raise _map_generator_failure(exc) from exc
-    except UserError as exc:
+
+    return _PreparedGenerate(
+        module=generate_module,
+        effective=effective,
+        dry_run=dry_run,
+        attachments=attachments,
+        run=run,
+    )
+
+
+def _generate_failure(generate_module: ModuleType, exc: Exception) -> HTTPException | None:
+    """Map a drafting failure to the HTTP error /generate reports, or ``None`` for a bug."""
+    if isinstance(exc, generate_module.GenerateError):
+        return _map_generator_failure(exc)
+    if isinstance(exc, UserError):
         # pydantic-ai's own configuration errors (a provider missing its API
         # key, an unknown model name): a setup problem, not a server bug.
         # A plain string detail, like every other pre-existing failure here --
         # the structured shape below is for attachment failures, which the panel
         # has to tell apart.
-        raise HTTPException(status_code=503, detail=f"model configuration error: {exc}") from exc
-    except UnexpectedModelBehavior as exc:
+        return HTTPException(status_code=503, detail=f"model configuration error: {exc}")
+    if isinstance(exc, UnexpectedModelBehavior):
         # The model never returned a reply that validates as a GraphDraft
         # within the retry budget: an upstream quality failure, reported as
         # such, with the reason the model was told on its last retry.
-        raise HTTPException(
+        return HTTPException(
             status_code=502, detail=f"the model did not produce a valid draft: {exc}"
-        ) from exc
-    except ModelAPIError as exc:
+        )
+    if isinstance(exc, ModelAPIError):
         # The provider refused or failed the request (4xx/5xx from the model
         # API): report it verbatim as an upstream failure, never a traceback.
-        raise HTTPException(status_code=502, detail=f"model API error: {exc}") from exc
+        return HTTPException(status_code=502, detail=f"model API error: {exc}")
+    return None
 
+
+def _finish_generate(
+    body: GenerateGraphRequest, prepared: _PreparedGenerate, result: GenerateResult
+) -> GenerateGraphResponse:
+    """Apply the request's name/model, save the graph, and build the response.
+
+    Raises:
+        HTTPException: 500 when the graph cannot be saved.
+    """
+    effective = prepared.effective
     graph = result.graph
     if body.name:
         graph = graph.model_copy(update={"name": body.name.strip() or graph.name})
@@ -498,8 +666,8 @@ async def generate_graph_route(body: GenerateGraphRequest) -> GenerateGraphRespo
         model=GenerateModelOut(
             provider=effective.provider, model=effective.model, source=effective.source
         ),
-        dry_run=dry_run,
-        attachments=_attachment_summaries(attachments),
+        dry_run=prepared.dry_run,
+        attachments=_attachment_summaries(prepared.attachments),
     )
 
 
@@ -514,5 +682,6 @@ __all__ = [
     "GenerateGraphRequest",
     "GenerateGraphResponse",
     "GenerateModelOut",
+    "GenerateProgressOut",
     "router",
 ]

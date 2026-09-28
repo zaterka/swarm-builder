@@ -905,6 +905,46 @@
         }
       }
     },
+    "/api/graphs/generate/stream": {
+      "post": {
+        "tags": [
+          "generate"
+        ],
+        "summary": "Generate Graph Stream Route",
+        "description": "``/graphs/generate``, reporting each draft and review as it happens.\n\nEverything that can be refused up front (the model route, the attachments)\nstill fails with a plain HTTP status; only failures once drafting has begun\narrive in-band, because by then the 200 is committed.\n\nRaises:\n    HTTPException: The same pre-flight statuses as ``/graphs/generate``.",
+        "operationId": "generate_graph_stream_route_api_graphs_generate_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateGraphRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "SSE: `progress` events (stage, attempt, maxAttempts, problems), then `saving`, then one terminal `done` (a GenerateGraphResponse) or `error` (`{status, detail}`, the status and detail /generate would have returned)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "text/event-stream": {}
+            }
+          },
+          "413": {
+            "description": "the attachments exceed the per-request size cap"
+          },
+          "422": {
+            "description": "the description or an attachment is unusable"
+          },
+          "503": {
+            "description": "no usable route or credential, or the generator is unavailable"
+          }
+        }
+      }
+    },
     "/api/graphs/attachments": {
       "post": {
         "tags": [

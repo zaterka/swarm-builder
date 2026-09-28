@@ -6,6 +6,8 @@ import type {
   ClarifyResponse,
   FindingOut,
   GenerateGraphResponse,
+  GenerateProgressEvent,
+  GenerateStreamUpdate,
   HealthResponse,
   ProblemDetail,
   SwarmGraph,
@@ -127,6 +129,75 @@ function formatChars(chars: number): string {
   return chars >= 1000 ? `${(chars / 1000).toFixed(1)}k characters` : `${chars} characters`;
 }
 
+function formatElapsed(seconds: number): string {
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+const PROGRESS_STEPS = ['Check description', 'Draft', 'Review', 'Save'] as const;
+
+interface GenerateProgressProps {
+  phase: 'analyzing' | 'generating';
+  update: GenerateStreamUpdate | null;
+  /** The most recent rejected draft, kept after the redraft starts. */
+  rejection: GenerateProgressEvent | null;
+  elapsedSeconds: number;
+}
+
+/** Where the describe flow is: a segmented bar (one segment per step, the
+ * active one animated), the step names, and a line saying what is happening. */
+function GenerateProgress({ phase, update, rejection, elapsedSeconds }: GenerateProgressProps) {
+  let active: number;
+  let status: string;
+  if (phase === 'analyzing') {
+    active = 0;
+    status = 'Checking whether anything is ambiguous before drafting…';
+  } else if (update?.stage === 'saving') {
+    active = 3;
+    status = 'The draft passed review. Saving the graph…';
+  } else if (update?.stage === 'reviewing') {
+    active = 2;
+    status = `Checking draft ${update.attempt} against the reviewer's rules…`;
+  } else {
+    active = 1;
+    const attempt = update && update.stage !== 'rejected' ? update.attempt : (rejection?.attempt ?? 0) + 1;
+    const count = rejection?.problems.length ?? 0;
+    status =
+      rejection && attempt > 1
+        ? `The reviewer found ${count} problem${count === 1 ? '' : 's'} in draft ${rejection.attempt}; ` +
+          `the model is redrafting (attempt ${attempt} of ${rejection.maxAttempts})…`
+        : 'The model is drafting nodes and edges. This is usually the longest step…';
+  }
+  const draftLabel =
+    update && 'attempt' in update && update.attempt > 1
+      ? `Draft ${update.attempt} of ${update.maxAttempts}`
+      : PROGRESS_STEPS[1];
+
+  return (
+    <div className="sb-generate-progress" role="status" aria-live="polite">
+      <ol className="sb-generate-progress-steps">
+        {PROGRESS_STEPS.map((label, index) => {
+          const state = index < active ? 'done' : index === active ? 'active' : 'pending';
+          return (
+            <li
+              key={label}
+              className={`sb-generate-progress-step sb-generate-progress-${state}`}
+              aria-current={state === 'active' ? 'step' : undefined}
+            >
+              <span className="sb-generate-progress-bar" />
+              <span className="sb-generate-progress-label">{index === 1 ? draftLabel : label}</span>
+            </li>
+          );
+        })}
+      </ol>
+      <p className="sb-generate-progress-status">
+        <span className="sb-generate-progress-spinner" aria-hidden="true" />
+        {status}
+        <span className="sb-generate-progress-elapsed">{formatElapsed(elapsedSeconds)}</span>
+      </p>
+    </div>
+  );
+}
+
 /**
  * Describe a workflow in prose — optionally with supplementary files — and get a
  * whole graph back (PLAN-V2-FEATURES.md Feature 2, extended by
@@ -161,6 +232,9 @@ export function GeneratePanel({
   const [doneNotice, setDoneNotice] = useState<string | null>(null);
   /** Notes the server attached to the files a generation used, shown once. */
   const [attachmentWarnings, setAttachmentWarnings] = useState<string[]>([]);
+  const [progress, setProgress] = useState<GenerateStreamUpdate | null>(null);
+  const [rejection, setRejection] = useState<GenerateProgressEvent | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   const fileInput = useRef<HTMLInputElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -193,6 +267,17 @@ export function GeneratePanel({
   const modelConfigured = health ? health.modelConfigured || health.dryRun : true;
   const dryRun = analysis?.dryRun ?? health?.dryRun ?? false;
   const busy = phase === 'analyzing' || phase === 'generating';
+
+  useEffect(() => {
+    if (!busy) return undefined;
+    const startedAt = Date.now();
+    setElapsedSeconds(0);
+    const timer = window.setInterval(
+      () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000)),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [busy]);
   const readyChips = chips.filter((chip) => chip.status === 'ready');
   const uploading = chips.some((chip) => chip.status === 'reading');
   const canGenerate =
@@ -316,6 +401,10 @@ export function GeneratePanel({
       }
       setPhase('generating');
       setFailure(null);
+      setProgress(null);
+      setRejection(null);
+      const controller = new AbortController();
+      abortRef.current = controller;
       const answers = questions.flatMap((question) => {
         const choice = choices[question.id];
         const answer =
@@ -324,16 +413,25 @@ export function GeneratePanel({
         return [{ questionId: question.id, question: question.question, answer }];
       });
       try {
-        const response: GenerateGraphResponse = await api.generateGraph({
-          description: description.trim(),
-          graphId: replaceGraphId ?? null,
-          name: replaceGraphId ? (keepName ?? null) : null,
-          modelOverride: null,
-          attachmentIds: readyChips
-            .map((chip) => chip.attachment?.id)
-            .filter((id): id is string => Boolean(id)),
-          answers,
-        });
+        const response: GenerateGraphResponse = await api.generateGraphStream(
+          {
+            description: description.trim(),
+            graphId: replaceGraphId ?? null,
+            name: replaceGraphId ? (keepName ?? null) : null,
+            modelOverride: null,
+            attachmentIds: readyChips
+              .map((chip) => chip.attachment?.id)
+              .filter((id): id is string => Boolean(id)),
+            answers,
+          },
+          {
+            signal: controller.signal,
+            onUpdate: (update) => {
+              setProgress(update);
+              if (update.stage === 'rejected') setRejection(update);
+            },
+          },
+        );
         liveIds.current.clear();
         const used = response.attachments ?? [];
         const fileCount = used.length;
@@ -721,16 +819,13 @@ export function GeneratePanel({
           Reading the attached files…
         </div>
       )}
-      {phase === 'analyzing' && (
-        <div className="sb-hint" aria-live="polite">
-          Checking whether anything is ambiguous before drafting…
-        </div>
-      )}
-      {phase === 'generating' && (
-        <div className="sb-hint" aria-live="polite">
-          Drafting nodes and edges, then checking the result with the reviewer… this usually takes
-          10–40 seconds.
-        </div>
+      {(phase === 'analyzing' || phase === 'generating') && (
+        <GenerateProgress
+          phase={phase}
+          update={progress}
+          rejection={rejection}
+          elapsedSeconds={elapsedSeconds}
+        />
       )}
       {notice && <div className="sb-hint">{notice}</div>}
       {doneNotice && (
